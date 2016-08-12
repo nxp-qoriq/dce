@@ -1,0 +1,21 @@
+.*
+*.o
+*.o.*
+*.a
+*.s
+*.so
+*.so.dbg
+*.tar
+*.gz
+*.patch
+*.gcno
+*.dwo
+/tags
+/TAGS
+
+# git files that we don't want to ignore even if they are dot-files
+!.gitignore
+
+# cscope files
+cscope.*
+ncscope.*
