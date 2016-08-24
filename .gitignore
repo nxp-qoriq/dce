@@ -1,5 +1,6 @@
 .*
 *.o
+*.d
 *.o.*
 *.a
 *.s
@@ -10,6 +11,7 @@
 *.patch
 *.gcno
 *.dwo
+bin/
 /tags
 /TAGS
 

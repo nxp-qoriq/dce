@@ -1,0 +1,95 @@
+This README describes how to build and run example applications of the dce.h
+library.
+
+dce-api-perf-test
+
+This is a example application of the dce.h library. It can compress or
+decompress data multiple formats and modes. e.g. zlib/raw stateful/stateless.
+The number of threads and MC resources (interfaces to the DCE hardware
+accelerator) is flexible. It can be configured to run multiple threads or a
+single thread. The number of threads can be specified per DCE interface
+(DPDCEI). Please use the --help option to get a full list of parameters.
+
+
+Build instructions
+
+1. place the dce folder inside the sdk/sources/ directory
+2. export ARCH=arm64
+3. export CROSS_COMPILE=path-to-arm-compiler- #e.g. /opt/aarch64-toolchain/gcc-linaro-aarch64-linux-gnu-4.8-2013.12_linux/bin/aarch64-linux-gnu-
+5. type make in the dce directory $ /dce$ make
+
+Running the test application:
+
+Example:
+
+kernel boot
+...
+...
+done.
+Starting network benchmark server: netserver.
+Starting system log daemon...0
+Starting kernel log daemon...0
+Starting internet superserver: xinetd.
+
+QorIQ SDK (FSL Reference Distro) 2.0 ls2080ardb /dev/ttyS1
+ls2080ardb login: root
+root@ls2080ardb:~# # Get application onto board through ethernet or usb or some other means
+root@ls2080ardb:~# # Create objects needed for dce 
+root@ls2080ardb:~# restool dprc create dprc.1 --label="DCE test dprc" # This command creates a container private to one application
+dprc.2 is created under dprc.1
+root@ls2080ardb:~# restool dpio create # This command creates a portal for CPU to communicate with hardware accelerators like DCE and SEC
+dpio.8 is created under dprc.1
+root@ls2080ardb:~# restool dpdcei create --priority=1 --engine=DPDCEI_ENGINE_COMPRESSION # This command creates a compression interface to DCE. Decompression can be done by setting --engine=DPDCEI_ENGINE_DECOMPRESSION instead
+dpdcei.0 is created under dprc.1
+root@ls2080ardb:~# restool dpdcei create --priority=1 --engine=DPDCEI_ENGINE_DECOMPRESSION # This command creates a decompression interface to DCE
+dpdcei.1 is created under dprc.1
+root@ls2080ardb:~# restool dprc assign dprc.1 --child=dprc.2 --object=dpio.8 --plugged=1 # This command moves the dpio object created earlier into the private container we created earlier
+root@ls2080ardb:~# restool dprc assign dprc.1 --child=dprc.2 --object=dpdcei.0 --plugged=1 # This command moves the dpdcei object created into our private container
+root@ls2080ardb:~# restool dprc assign dprc.1 --child=dprc.2 --object=dpdcei.1 --plugged=1 # This command moves the dpdcei object created into our private container
+ root@ls2080ardb:/var/volatile#  restool dprc show dprc.2 # This command is not necessary, but it shows the state of our private container and the objects inside of it
+ dprc.2 contains 3 objects:
+ object          label           plugged-state
+ dpdcei.1                        plugged
+ dpdcei.0                        plugged
+ dpio.8                          plugged
+root@ls2080ardb:~#
+root@ls2080ardb:~# # Get vfio binding script from dce directory onto board. dce/bind_dprc.sh
+root@ls2080ardb:~# ./bind_dprc.sh dprc.2
+#1)    Allow unsafe interrupts
+#1.1)    dprc.2 container driver override
+root@ls2080ardb:~#
+root@ls2080ardb:~#
+root@ls2080ardb:~#
+root@ls2080ardb:~#
+root@ls2080ardb:~# # The following example uses the compression dpdcei. In this case dpdcei.0. Any data sent using this dpdcei to DCE will be compressed
+root@ls2080ardb:~# ./dce-api-perf-test --in=input-file --paradigm=stateful-recycle --format=zlib --chunk-size=4096 --resources dprc.2 dpio.8 dpdcei.0 threads 1
+Worker 0: Received stop signal. Waiting for 536 outstanding work requests
+Worker 0: spun 3147 times waiting for last frames
+Worker 0: tx_max = 1997 rx_max = 9 tx_min = 1989 rx_min = 0 tx_avg = 1993 rx_avg = 0 reads = 1207. Interrupt count = 1
+Took 9989980 us to process 14499233792 bytes, and output 2632202555 bytes. Cycles elapsed 250044808. Counter frequency is 25029560
+Throughput is 11611 Mbps
+root@ls2080ardb:~#
+root@ls2080ardb:~#
+root@ls2080ardb:~# # The application ran successfully and reported measured throughput
+root@ls2080ardb:~#
+root@ls2080ardb:~# We can now run the application again
+root@ls2080ardb:~# ./dce-api-perf-test --in=input-file --paradigm=stateful-recycle --format=zlib --chunk-size=4096 --resources dprc.2 dpio.8 dpdcei.0 threads 1
+Worker 0: Received stop signal. Waiting for 148 outstanding work requests
+Worker 0: spun 825 times waiting for last frames
+Worker 0: tx_max = 1997 rx_max = 1 tx_min = 1994 rx_min = 0 tx_avg = 1994 rx_avg = 0 reads = 1215. Interrupt count = 1
+Took 9994837 us to process 14501732352 bytes, and output 2632592951 bytes. Cycles elapsed 250163988. Counter frequency is 25029320
+Throughput is 11607 Mbps
+root@ls2080ardb:~#
+root@ls2080ardb:~#
+root@ls2080ardb:~# # The following example uses a decompression dpdcei. In this case dpdcei.1. Any data sent using this dpdcei to DCE will be decompressed, if correctly formatted. Sending regular data for decompression will result in an error
+root@ls2080ardb:~# # Notice we change the resources so that dpdcei.1 is used in this case instead of dpdcei.0
+root@ls2080ardb:~# dce-api-perf-test --in=input-file.z --paradigm=stateful-recycle --format=zlib --time=3 --chunk-size=4096 --resources dprc.2 dpio.8 dpdcei.1 threads 1
+Worker 0: Received stop signal. Waiting for 291 outstanding work requests
+Worker 0: spun 9481 times waiting for last frames
+Worker 0: tx_max = 3999 rx_max = 1 tx_min = 3996 rx_min = 0 tx_avg = 3996 rx_avg = 0 enqueuer got ahead 312 times. Interrupt count = 1
+Took 10001469 us to process 2378035257 bytes, and output 6767521808 bytes. Cycles elapsed 250334386. Counter frequency is 25029760
+Throughput is 11413 Mbps
+root@ls2080ardb:~#
+root@ls2080ardb:~#
+root@ls2080ardb:~#
+root@ls2080ardb:~#
