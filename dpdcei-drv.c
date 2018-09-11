@@ -343,27 +343,41 @@ static int dpaa2_dce_pull_dequeue_rx(struct dpdcei *dpdcei)
 
 static void fqdan_cb_rx(struct dpaa2_io_notification_ctx *ctx)
 {
+	int ret;
 	struct dpdcei *dpdcei = container_of(ctx, struct dpdcei,
 						   notif_ctx_rx);
 
 	dpaa2_dce_pull_dequeue_rx(dpdcei);
-	dpaa2_io_service_rearm(dpdcei->dpio_p, ctx);
+	ret = dpaa2_io_service_rearm(dpdcei->dpio_p, ctx);
+	if (ret)
+		pr_err("Failed to rearm fqid %u in dpdcei.%d\n",
+				dpdcei->rx_fqid, dpdcei->attr.id);
 }
 
-static int __cold dpdcei_dpio_service_setup(struct dpdcei *dpdcei)
+static int __cold dpdcei_dpio_service_setup(struct dpdcei *dpdcei, int cpu)
 {
 	int err;
+	cpu_set_t cpu_set, restore_cpu_set;
+
+	CPU_ZERO(&restore_cpu_set);
+	CPU_ZERO(&cpu_set);
 
 	/* Register notification callbacks */
 	dpdcei->notif_ctx_rx.is_cdan = 0;
-	dpdcei->notif_ctx_rx.desired_cpu = -1;
+	dpdcei->notif_ctx_rx.desired_cpu = cpu;
 	dpdcei->notif_ctx_rx.cb = fqdan_cb_rx;
 	dpdcei->notif_ctx_rx.id = dpdcei->rx_fqid;
+	pthread_getaffinity_np(pthread_self(), sizeof(cpu_set_t),
+							&restore_cpu_set);
+	CPU_SET(cpu, &cpu_set);
+	pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpu_set);
 	err = dpaa2_io_service_register(dpdcei->dpio_p, &dpdcei->notif_ctx_rx);
 	if (err) {
 		pr_err("Rx notif register failed 0x%x\n", err);
 		return err;
 	}
+	pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t),
+							&restore_cpu_set);
 	return 0;
 }
 
@@ -532,7 +546,7 @@ struct dpdcei *dpdcei_setup(struct dpaa2_io *dpio, int dpdcei_id)
 		goto err_alloc_store;
 
 	/* dpio services */
-	err = dpdcei_dpio_service_setup(dpdcei);
+	err = dpdcei_dpio_service_setup(dpdcei, dpio->dpio_desc.cpu);
 	if (err)
 		goto err_dpio_service_setup;
 
