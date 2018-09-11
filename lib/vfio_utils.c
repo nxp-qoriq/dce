@@ -183,9 +183,13 @@ void *vfio_map_portal_mem(const char *deviceid, int mem_type)
 		return NULL;
 	}
 	if (mem_type == PORTAL_MEM_CENA) {
+		static bool once;
 		// Stashing work around
 		// TOOO: check version - not needed on rev 2
-		vfio_dma_map_area((uint64_t) vaddr, reg.offset, reg.size);
+		if (!once)
+			vfio_dma_map_area((uint64_t) vaddr, reg.offset,
+					reg.size);
+		once = true;
 	}
 	return vaddr;
 }

@@ -1,95 +1,244 @@
+DCE API and Library Version 1808
+----------------------------------
+
 This README describes how to build and run example applications of the dce.h
 library.
 
-dce-api-perf-test
+Test program: dce-api-perf-test
+-------------------------------
 
 This is a example application of the dce.h library. It can compress or
-decompress data multiple formats and modes. e.g. zlib/raw stateful/stateless.
-The number of threads and MC resources (interfaces to the DCE hardware
-accelerator) is flexible. It can be configured to run multiple threads or a
-single thread. The number of threads can be specified per DCE interface
-(DPDCEI). Please use the --help option to get a full list of parameters.
-
+decompress data with multiple formats and modes. e.g. zlib/raw
+stateful/stateless.  The number of threads and DPAA2 object resources
+(interfaces to the DCE hardware accelerator) is flexible. It can be
+configured to run multiple threads or a single thread. The number of
+threads can be specified per DCE interface (DPDCEI). Please use the
+--help option to get a full list of parameters.
 
 Build instructions
+------------------
 
-1. place the dce folder inside the sdk/sources/ directory
-2. export ARCH=arm64
-3. export CROSS_COMPILE=path-to-arm-compiler- #e.g. /opt/aarch64-toolchain/gcc-linaro-aarch64-linux-gnu-4.8-2013.12_linux/bin/aarch64-linux-gnu-
-5. type make in the dce directory $ /dce$ make
+You can cross compile or build natively.  For example,
 
-Running the test application:
+```
+  make CROSS_COMPILE=aarch64-linux-gnu-
+```
 
-Example:
+assuming cross compiler aarch64-linux-gnu-gcc is on your path.  Or
 
-kernel boot
-...
-...
-done.
-Starting network benchmark server: netserver.
-Starting system log daemon...0
-Starting kernel log daemon...0
-Starting internet superserver: xinetd.
+```
+  make CROSS_COMPILE=' '
+```
 
-QorIQ SDK (FSL Reference Distro) 2.0 ls2080ardb /dev/ttyS1
-ls2080ardb login: root
-root@ls2080ardb:~# # Get application onto board through ethernet or usb or some other means
-root@ls2080ardb:~# # Create objects needed for dce 
-root@ls2080ardb:~# restool dprc create dprc.1 --label="DCE test dprc" # This command creates a container private to one application
-dprc.2 is created under dprc.1
-root@ls2080ardb:~# restool dpio create # This command creates a portal for CPU to communicate with hardware accelerators like DCE and SEC
-dpio.8 is created under dprc.1
-root@ls2080ardb:~# restool dpdcei create --priority=1 --engine=DPDCEI_ENGINE_COMPRESSION # This command creates a compression interface to DCE. Decompression can be done by setting --engine=DPDCEI_ENGINE_DECOMPRESSION instead
-dpdcei.0 is created under dprc.1
-root@ls2080ardb:~# restool dpdcei create --priority=1 --engine=DPDCEI_ENGINE_DECOMPRESSION # This command creates a decompression interface to DCE
-dpdcei.1 is created under dprc.1
-root@ls2080ardb:~# restool dprc assign dprc.1 --child=dprc.2 --object=dpio.8 --plugged=1 # This command moves the dpio object created earlier into the private container we created earlier
-root@ls2080ardb:~# restool dprc assign dprc.1 --child=dprc.2 --object=dpdcei.0 --plugged=1 # This command moves the dpdcei object created into our private container
-root@ls2080ardb:~# restool dprc assign dprc.1 --child=dprc.2 --object=dpdcei.1 --plugged=1 # This command moves the dpdcei object created into our private container
- root@ls2080ardb:/var/volatile#  restool dprc show dprc.2 # This command is not necessary, but it shows the state of our private container and the objects inside of it
- dprc.2 contains 3 objects:
- object          label           plugged-state
- dpdcei.1                        plugged
- dpdcei.0                        plugged
- dpio.8                          plugged
-root@ls2080ardb:~#
-root@ls2080ardb:~# # Get vfio binding script from dce directory onto board. dce/bind_dprc.sh
-root@ls2080ardb:~# ./bind_dprc.sh dprc.2
-#1)    Allow unsafe interrupts
-#1.1)    dprc.2 container driver override
-root@ls2080ardb:~#
-root@ls2080ardb:~#
-root@ls2080ardb:~#
-root@ls2080ardb:~#
-root@ls2080ardb:~# # The following example uses the compression dpdcei. In this case dpdcei.0. Any data sent using this dpdcei to DCE will be compressed
-root@ls2080ardb:~# ./dce-api-perf-test --in=input-file --paradigm=stateful-recycle --format=zlib --chunk-size=4096 --resources dprc.2 dpio.8 dpdcei.0 threads 1
-Worker 0: Received stop signal. Waiting for 536 outstanding work requests
-Worker 0: spun 3147 times waiting for last frames
-Worker 0: tx_max = 1997 rx_max = 9 tx_min = 1989 rx_min = 0 tx_avg = 1993 rx_avg = 0 reads = 1207. Interrupt count = 1
-Took 9989980 us to process 14499233792 bytes, and output 2632202555 bytes. Cycles elapsed 250044808. Counter frequency is 25029560
-Throughput is 11611 Mbps
-root@ls2080ardb:~#
-root@ls2080ardb:~#
-root@ls2080ardb:~# # The application ran successfully and reported measured throughput
-root@ls2080ardb:~#
-root@ls2080ardb:~# We can now run the application again
-root@ls2080ardb:~# ./dce-api-perf-test --in=input-file --paradigm=stateful-recycle --format=zlib --chunk-size=4096 --resources dprc.2 dpio.8 dpdcei.0 threads 1
-Worker 0: Received stop signal. Waiting for 148 outstanding work requests
-Worker 0: spun 825 times waiting for last frames
-Worker 0: tx_max = 1997 rx_max = 1 tx_min = 1994 rx_min = 0 tx_avg = 1994 rx_avg = 0 reads = 1215. Interrupt count = 1
-Took 9994837 us to process 14501732352 bytes, and output 2632592951 bytes. Cycles elapsed 250163988. Counter frequency is 25029320
-Throughput is 11607 Mbps
-root@ls2080ardb:~#
-root@ls2080ardb:~#
-root@ls2080ardb:~# # The following example uses a decompression dpdcei. In this case dpdcei.1. Any data sent using this dpdcei to DCE will be decompressed, if correctly formatted. Sending regular data for decompression will result in an error
-root@ls2080ardb:~# # Notice we change the resources so that dpdcei.1 is used in this case instead of dpdcei.0
-root@ls2080ardb:~# dce-api-perf-test --in=input-file.z --paradigm=stateful-recycle --format=zlib --time=3 --chunk-size=4096 --resources dprc.2 dpio.8 dpdcei.1 threads 1
-Worker 0: Received stop signal. Waiting for 291 outstanding work requests
-Worker 0: spun 9481 times waiting for last frames
-Worker 0: tx_max = 3999 rx_max = 1 tx_min = 3996 rx_min = 0 tx_avg = 3996 rx_avg = 0 enqueuer got ahead 312 times. Interrupt count = 1
-Took 10001469 us to process 2378035257 bytes, and output 6767521808 bytes. Cycles elapsed 250334386. Counter frequency is 25029760
-Throughput is 11413 Mbps
-root@ls2080ardb:~#
-root@ls2080ardb:~#
-root@ls2080ardb:~#
-root@ls2080ardb:~#
+for a native build.
+
+Preparing DPAA2 Objects
+-----------------------
+
+Boot Linux one the NXP ARM system and transfer the contents of this
+directory to it if cross-compiling.
+
+The DCE application and library depend on some DPAA2 objects being
+created in a DPAA2 resource container (dprc).  This can be done
+statically for a production system, but these instructions assume they
+will be created dynamically using the "restool" command.  To run the
+example application, first enter these commands to create the objects
+and assign them to container dprc.2.  Notice that "sudo" runs the
+commands as root.  The "sleep" is defensive.  These objects are
+asynchronously hot plugged.  These commands print messages, including
+to syslog.  The messages are not shown below.
+
+```
+  sudo restool dprc create dprc.1 --label="DCE test dprc"
+
+  sudo restool dpio create
+  sudo restool dpio create
+  sudo restool dpio create
+
+  sudo restool dpdcei create --priority=1 --engine=DPDCEI_ENGINE_COMPRESSION
+  sudo restool dpdcei create --priority=1 --engine=DPDCEI_ENGINE_COMPRESSION
+  sudo restool dpdcei create --priority=1 --engine=DPDCEI_ENGINE_COMPRESSION
+
+  sudo restool dpdcei create --priority=1 --engine=DPDCEI_ENGINE_DECOMPRESSION
+  sudo restool dpdcei create --priority=1 --engine=DPDCEI_ENGINE_DECOMPRESSION
+  sudo restool dpdcei create --priority=1 --engine=DPDCEI_ENGINE_DECOMPRESSION
+
+  sleep 1
+  sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpio.16 --plugged=1
+  sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpio.17 --plugged=1
+  sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpio.18 --plugged=1
+
+  sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpdcei.0 --plugged=1
+  sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpdcei.1 --plugged=1
+  sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpdcei.2 --plugged=1
+
+  sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpdcei.3 --plugged=1
+  sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpdcei.4 --plugged=1
+  sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpdcei.5 --plugged=1
+
+```
+
+You can use this last restool command to check that all objects were
+created.  Here is an example (with output):
+
+```
+  sudo restool dprc show dprc.2
+  dprc.2 contains 6 objects:
+  object          label           plugged-state
+  dpdcei.2                        plugged
+  dpdcei.1                        plugged
+  dpdcei.0                        plugged
+  dpio.18                         plugged
+  dpio.17                         plugged
+  dpio.16                         plugged
+```
+
+Note the names of the objects (like dprc.2 and dpio.18).  They have to
+match in the commands below.  Obviously, scripts could handle all
+this, but these instructions are intentionally explicit.
+
+Binding the DPAA2 Resource Container to VFIO
+--------------------------------------------
+
+VFIO is a standard Linux facility that allows hardware devices to be
+directly assigned to user space while maintaining access control and
+isolation.  The following commands bind dprc.2 to VFIO.  Keep in mind
+that the name "dprc.2" must match.  The example shows the commands
+being done literally as root (after sudo su) because it makes the
+redirection clearer.
+
+```
+  sudo su
+  echo 1 > /sys/module/vfio_iommu_type1/parameters/allow_unsafe_interrupts
+  echo vfio-fsl-mc > /sys/bus/fsl-mc/devices/dprc.2/driver_override
+  echo dprc.2 > /sys/bus/fsl-mc/drivers/vfio-fsl-mc/bind
+  exit
+```
+
+At this point, you can run the example applications as often as you
+like because its hardware resources have been allocated and assigned.
+
+Running stateless compression in asynchronous mode
+---------------------------------------------------
+
+This is a high-performance use case in which blocks of data are
+compressed independently.  In addition three threads are used to feed
+the DCE.
+
+```
+  # Put some data into input-file
+  sudo bin/dce-api-perf-test --in=input-file --paradigm=stateless --time=2 --format=gzip --chunk-size=16384 \
+   --resources dprc.2 dpio.16 dpdcei.0 threads 1 dpio.17 dpdcei.1 threads 1 dpio.18 dpdcei.2 threads 1
+```
+
+The output is
+
+```
+  Worker 2_eq: Done work. Waiting for 300 outstanding work requests before exit
+  Worker 1_eq: Done work. Waiting for 297 outstanding work requests before exit
+  Worker 0_eq: Done work. Waiting for 292 outstanding work requests before exit
+  Worker 0_eq: tx_max = 1934 rx_max = 134 tx_min = 1863 rx_min = 62 tx_avg = 1920 rx_avg = 62 enqueuer got ahead 1  26 times. Interrupt count = 80359
+  Worker 1_eq: tx_max = 1996 rx_max = 6 tx_min = 1976 rx_min = 0 tx_avg = 1987 rx_avg = 0 enqueuer got ahead 121 times. Interrupt count = 80360
+  Worker 2_eq: tx_max = 1877 rx_max = 76 tx_min = 1794 rx_min = 4 tx_avg = 1794 rx_avg = 58 enqueuer got ahead 126 times. Interrupt count = 80369
+  Took 2006397 us to process 10561885184 bytes, and output 4090115746 bytes. Cycles elapsed 50221964. Counter frequency is 25030920
+  Throughput is 42112 Mbps
+```
+
+The measured compression rate is 42112 Mbps.  The compression ratio
+achieved is
+
+  10561885184./4090115746. = 2.58
+
+Running stateful compression in synchronous mode and writing output to a file
+------------------------------------------------------------------------------
+
+This example is a lower-performance use case co-mingled with file I/O.
+It uses three threads to feed DCE, compressing the data from
+input-file three times.  The result does not show the performance
+capabilities of DCE.  A different example application could.  But
+this application allows one to see that gunzip can process what DCE
+compresses.
+
+```
+  # Put some data into input-file.
+  sudo ./bin/dce-api-perf-test --synchronous --in=input-file --out=output-file.gz --paradigm=stateful-recycle \
+    --time=2 --format=gzip  --chunk-size=16384 \
+   --resources dprc.2 dpio.16 dpdcei.0 threads 1 dpio.17 dpdcei.1 threads 1 dpio.18 dpdcei.2 threads 1
+```
+
+The output looks like this:
+
+```
+  Worker 2_eq: Done work. Waiting for 2 outstanding work requests before exit
+  Worker 1_eq: Done work. Waiting for 0 outstanding work requests before exit
+  Worker 0_eq: Worker 1_eq: tx_max = 0 rx_max = 0 tx_min = 4294967295 rx_min = 4294967295 tx_avg = 0 rx_avg = 0 enqueuer got ahead 0 times. Interrupt count = 98482
+  Worker 2_eq: Done work. Waiting for 0 outstanding work requests before exit
+  Worker 0_eq: tx_max = 0 rx_max = 0 tx_min = 4294967295 rx_min = 4294967295 tx_avg = 0 rx_avg = 0 enqueuer got ahead 0 times. Interrupt count = 98482
+  tx_max = 0 rx_max = 0 tx_min = 4294967295 rx_min = 4294967295 tx_avg = 0 rx_avg = 0 enqueuer got ahead 0 times. Interrupt count = 98482
+  Took 1997255 us to process 1640031232 bytes, and output 616670144 bytes. Cycles elapsed 50008214. Counter frequency is 25038460
+  Throughput is 6569 Mbps
+```
+
+You can use gunzip to decompress one of the files that was created and
+see that it matches the input file.
+
+```
+  cp output-file.gz_0 foo.0.gz
+  gunzip foo.0.gz
+  sha1sum input-file foo.0
+  284b3e13cc79662bc056af7e673fbdbebc682f0e  input-file
+  284b3e13cc79662bc056af7e673fbdbebc682f0e  foo.0
+```
+
+Running stateful decompression in synchronous mode and writing output to a file
+--------------------------------------------------------------------------------
+
+This is an example of decompression per the stateful, synchronous use
+case with file output.  Again, this is not a high-performance use case
+due to the way the test application is constructed.
+
+  cp input-file compress_input
+  gzip compress_input
+  sudo bin/dce-api-perf-test --in=compressed_in.gz --paradigm=stateful-recycle --format=gzip \
+      --chunk-size=4096 --synchronous --out=uncomp_out \
+      --resources dprc.2 dpio.16 dpdcei.3 threads 1 dpio.17 dpdcei.4 threads 1 dpio.18 dpdcei.5 threads 1
+
+The output looks like this:
+
+```
+  Worker 1_eq: Done work. Waiting for 1 outstanding work requests before exit
+  Worker 0_eq: Done work. Waiting for 0 outstanding work requests before exit
+  Worker 0_eq: tx_max = 0 rx_max = 0 tx_min = 4294967295 rx_min = 4294967295 tx_avg = 0 rx_avg = 0 enqueuer got ahead 0 times. Interrupt count = 89741
+  Worker 2_eq: Done work. Waiting for 0 outstanding work requests before exit
+  Worker 2_eq: tx_max = 0 rx_max = 0 tx_min = 4294967295 rx_min = 4294967295 tx_avg = 0 rx_avg = 0 enqueuer got ahead 0 times. Interrupt count = 89744
+  Worker 1_eq: tx_max = 0 rx_max = 0 tx_min = 4294967295 rx_min = 4294967295 tx_avg = 0 rx_avg = 0 enqueuer got ahead 0 times. Interrupt count = 89744
+  Took 1997805 us to process 367468676 bytes, and output 1120840003 bytes. Cycles elapsed 50008070. Counter frequency is 25031500
+  Throughput is 4488 Mbps
+```
+
+You can check that the output is correct.
+
+```
+  sha1sum input-file uncomp_out_*
+  284b3e13cc79662bc056af7e673fbdbebc682f0e  input-file
+  284b3e13cc79662bc056af7e673fbdbebc682f0e  uncomp_out_0
+  284b3e13cc79662bc056af7e673fbdbebc682f0e  uncomp_out_1
+  284b3e13cc79662bc056af7e673fbdbebc682f0e  uncomp_out_2
+```
+
+About the DCE API and libraries
+-------------------------------
+
+The DCE API provides a set of user-space APIs that simplify access to
+DCE. The driver provides accessor objects called sessions which
+maintain state in coordination with the hardware. The responses from
+DCE can then be polled by the user. This DCE API is meant to be
+entirely sufficient for a user to use DCE without having to read the
+related HW documents. It is documented in file dce/dce.h.
+
+Known issues
+------------
+
+Multiple DPDCEIs can be attached to a single DPIO. This use case is
+supported but no scheduling fairness can be guaranteed in this
+release. This use mode may result in the starvation of some DPDCEIs.

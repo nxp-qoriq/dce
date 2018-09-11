@@ -1,6 +1,6 @@
 /*
  * SPDX-License-Identifier:     BSD-3-Clause
- * Copyright 2016 Freescale Semiconductor, Inc.
+ * Copyright 2018 Freescale Semiconductor, Inc.
  * All rights reserved.
  */
 #include "dce-scf-compression.h"
@@ -95,12 +95,28 @@ static void sync_callback(struct dce_flow *flow, u32 cmd,
 static void internal_callback(struct dce_flow *flow, u32 cmd,
 			    const struct dpaa2_fd *fd)
 {
+#ifdef DEBUG
+	static struct work_unit *prev_work;
+#endif
 	struct dce_session *session = container_of(flow,
 						   struct dce_session,
 						   flow);
 	union store *store = (void *)dpaa2_fd_get_addr(fd);
 	struct work_unit *work_unit =
 		container_of(store, struct work_unit, store);
+#ifdef DEBUG
+	if (!prev_work)
+		prev_work = session->fifo.mem;
+
+	if (work_unit != (prev_work + 1) && work_unit != session->fifo.mem) {
+		pr_err("Line %d Mem start is %p and work_unit we got is %p and the previous work_unit was %p\n",
+			__LINE__, session->fifo.mem, work_unit, prev_work);
+		getchar();
+	}
+
+	prev_work = work_unit;
+#endif
+
 	switch ((enum dce_cmd)cmd) {
 	case DCE_CMD_NOP:
 #ifdef NOP_TEST
@@ -116,11 +132,23 @@ static void internal_callback(struct dce_flow *flow, u32 cmd,
 		assert(false); /* we should never be here */
 		break;
 	case DCE_CMD_PROCESS:
-#ifdef debug
+#ifdef DEBUG
 		pr_info("Received callback for DCE process command\n");
 #endif
 		assert(!circ_fifo_empty(&session->fifo));
 		work_unit->fd_list = *fd;
+
+#ifdef DEBUG
+		if (work_unit->state != TODO) {
+			pr_info("work_unit found in unexpected state %s. Expected TODO\n",
+				work_unit->state == FREE ? "FREE" : "DONE");
+			getchar();
+		}
+		if ((work_unit - 1)->state == TODO) {
+			pr_err("previous work_unit found in unexpected state TODO\n");
+			getchar();
+		}
+#endif
 		work_unit->state = DONE;
 		if (session->notify_arm)
 			session->work_done_callback(session->notification_context);
@@ -426,6 +454,9 @@ int dce_enqueue_fd_pair(struct dce_session *session,
 			struct dce_op_fd_pair_tx *op)
 {
 	struct dce_flow *flow = &session->flow;
+#ifdef DEBUG
+	static struct work_unit *prev_work;
+#endif
 	struct work_unit *work_unit;
 	struct dpaa2_fd *fd_list;
 	struct dpaa2_fd *input_fd;
@@ -452,9 +483,18 @@ int dce_enqueue_fd_pair(struct dce_session *session,
 	assert(!session->recycle_todo);
 
 	work_unit = circ_fifo_alloc(&session->fifo);
+#ifdef DEBUG
+	if (!prev_work)
+		prev_work = work_unit - 1;
+	if (work_unit != (prev_work + 1) && work_unit != session->fifo.mem) {
+		pr_err("Line %d Mem start is %p and work_unit we got is %p and the previous work_unit was %p\n",
+			__LINE__, session->fifo.mem, work_unit, prev_work);
+		getchar();
+	}
+#endif
 	if (!work_unit) {
-#ifdef debug
-		pr_err("Too many DCE rquests in flight! backoff!\n");
+#ifdef DEBUG
+		pr_debug("Too many DCE rquests in flight! backoff!\n");
 #endif
 		ret = -ENOSPC;
 		goto err_no_space;
@@ -538,7 +578,7 @@ int dce_enqueue_fd_pair(struct dce_session *session,
 	 */
 	work_unit->output_length = dpaa2_fd_get_len(output_fd);
 
-#ifdef debug
+#ifdef DEBUG
 	pr_info("dce: Before enqueue\n");
 	pretty_print_fd(fd_list);
 	pretty_print_fle_n(
@@ -547,8 +587,13 @@ int dce_enqueue_fd_pair(struct dce_session *session,
 	hexdump(fd_list, sizeof(*fd_list));
 	hexdump(work_unit->store.fd_list_store,
 			sizeof(work_unit->store.fd_list_store[0])*3);
-#endif
 
+	if (work_unit->state != FREE) {
+		pr_err("Out of order FIFO allocation detected. Paused for debug\n");
+		getchar();
+	}
+#endif
+	work_unit->state = TODO;
 	/* enqueue request */
 	ret = enqueue_fd(flow, fd_list);
 	if (session->paradigm == DCE_STATEFUL_RECYCLE)
@@ -556,7 +601,9 @@ int dce_enqueue_fd_pair(struct dce_session *session,
 	if (ret)
 		goto fail_enqueue;
 
-	work_unit->state = TODO;
+#ifdef DEBUG
+	prev_work = work_unit;
+#endif
 
 	return 0;
 
@@ -564,6 +611,7 @@ fail_enqueue:
 	/* Cannot use circ_fifo_free() because that would change the head index
 	 * of the fifo, but we want to return a buffer at the tail index
 	 */
+	 work_unit->state = FREE;
 	circ_fifo_alloc_undo(&session->fifo);
 err_no_space:
 	if (session->paradigm == DCE_STATEFUL_RECYCLE)
@@ -578,9 +626,19 @@ int dce_dequeue_fd_pair(struct dce_session *session,
 			struct dce_op_fd_pair_rx *ops,
 			unsigned int num_ops)
 {
+#ifdef DEBUG
+	static struct work_unit *prev_work;
+#endif
 	struct work_unit *work_unit = circ_fifo_head(&session->fifo);
 	unsigned int i, ret;
-
+#ifdef DEBUG
+	if (prev_work != NULL && prev_work != work_unit - 1 &&
+			work_unit != session->fifo.mem)	{
+		pr_err("Line %d Mem start is %p and work_unit we got is %p and the previous work_unit was %p\n",
+			__LINE__, session->fifo.mem, work_unit, prev_work);
+		getchar();
+	}
+#endif
 	if (session->paradigm == DCE_STATEFUL_RECYCLE) {
 		ret = pthread_mutex_trylock(&session->lock);
 		if (ret) {
@@ -595,6 +653,19 @@ int dce_dequeue_fd_pair(struct dce_session *session,
 	for (i = 0;
 		i < num_ops && work_unit->state == DONE;
 		i++, work_unit = circ_fifo_head(&session->fifo)) {
+
+#ifdef DEBUG
+		if (prev_work != NULL && prev_work != work_unit - 1 &&
+				work_unit != session->fifo.mem)	{
+			pr_err("Line %d Mem start is %p and work_unit we got is %p and the previous work_unit was %p\n",
+				__LINE__, session->fifo.mem, work_unit,
+				prev_work);
+			getchar();
+		}
+		prev_work = work_unit;
+#endif
+
+		dpaa2_fd_set_frc(&work_unit->store.output_fd, 0x0);
 		work_unit->state = FREE;
 		/* We should be checking at > 1, but there is a small chance
 		 * for a race where the enqueuer alloced the work_unit but did
@@ -677,7 +748,18 @@ int dce_dequeue_fd_pair(struct dce_session *session,
 			break;
 		}
 		ops[i].user_context = work_unit->store.context;
+#ifdef DEBUG
+		struct work_unit *test = circ_fifo_head(&session->fifo);
+#endif
 		circ_fifo_free(&session->fifo);
+#ifdef DEBUG
+		if (circ_fifo_head(&session->fifo) != (test + 1) &&
+				circ_fifo_head(&session->fifo) != session->fifo.mem) {
+			pr_err("bad freer increment detected. Expected to go from %p to %p, instead went to %p\n",
+				test, test + 1, circ_fifo_head(&session->fifo));
+			getchar();
+		}
+#endif
 	}
 	if (session->paradigm == DCE_STATEFUL_RECYCLE) {
 		ret = pthread_mutex_unlock(&session->lock);
@@ -828,7 +910,7 @@ int dce_recycle_fd_pair(struct dce_session *session,
 
 	work_unit = circ_fifo_alloc(&session->fifo);
 	if (!work_unit) {
-#ifdef debug
+#ifdef DEBUG
 		pr_err("Too many DCE requests in flight! backoff!\n");
 #endif
 		ret = -ENOSPC;
@@ -902,7 +984,7 @@ int dce_recycle_fd_pair(struct dce_session *session,
 	 */
 	work_unit->output_length = dpaa2_fd_get_len(output_fd);
 
-#ifdef debug
+#ifdef DEBUG
 	pr_info("dce: Before enqueue\n");
 	pretty_print_fd(fd_list);
 	pretty_print_fle_n(
@@ -913,6 +995,7 @@ int dce_recycle_fd_pair(struct dce_session *session,
 			sizeof(work_unit->store.fd_list_store[0])*3);
 #endif
 
+	work_unit->state = TODO;
 	ret = enqueue_fd(flow, fd_list);
 	if (ret)
 		goto fail_enqueue;
@@ -928,7 +1011,6 @@ int dce_recycle_fd_pair(struct dce_session *session,
 		sem_post(&session->enqueue_sem);
 		ret = 1; /* Indicate that the session has exited recycle mode */
 	}
-	work_unit->state = TODO;
 	pthread_mutex_unlock(&session->lock);
 	return ret;
 
@@ -936,6 +1018,7 @@ fail_enqueue:
 	/* Cannot use circ_fifo_free() because that would change the head index
 	 * of the fifo, but we want to return a buffer at the tail index
 	 */
+	work_unit->state = FREE;
 	circ_fifo_alloc_undo(&session->fifo);
 err_no_space:
 err_not_allowed:

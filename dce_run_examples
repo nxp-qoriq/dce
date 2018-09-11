@@ -1,0 +1,35 @@
+#!/bin/bash
+
+# This script runs the DCE test application for several use cases.
+# See README.  And note that this script contains hardwired
+# object names.
+
+if ! test -e input-file; then
+  echo Put some data to compress into a file named input-fie
+  exit
+fi
+
+echo XXXXX async stateless compression XXXXXXXXXXXXXXXXXXXXXX
+
+sudo bin/dce-api-perf-test --in=input-file --paradigm=stateless --time=2 --format=gzip --chunk-size=16384 \
+   --resources dprc.2 dpio.16 dpdcei.0 threads 1 dpio.17 dpdcei.1 threads 1 dpio.18 dpdcei.2 threads 1
+
+echo XXXXX synchronous, stateful commpression with file output
+
+sudo ./bin/dce-api-perf-test --synchronous --in=input-file --out=output-file.gz --paradigm=stateful-recycle --time=2 --format=gzip \
+  --chunk-size=16384 --resources dprc.2 dpio.16 dpdcei.0 threads 1 dpio.17 dpdcei.1 threads 1 dpio.18 dpdcei.2 threads 1
+
+cp -f output-file.gz_0 foo.0.gz
+cp -f output-file.gz_1 foo.1.gz
+cp -f output-file.gz_2 foo.2.gz
+gunzip -f foo*.gz
+sha1sum input-file foo*; rm -f foo* output-file.gz_*
+
+echo XXXXX synchronous, stateful decommpression with file output
+
+cp input-file compressed_in
+gzip -f compressed_in
+sudo bin/dce-api-perf-test --in=compressed_in.gz --paradigm=stateful-recycle --format=gzip \
+    --chunk-size=4096 --synchronous --out=uncomp_out \
+    --resources dprc.2 dpio.16 dpdcei.3 threads 1 dpio.17 dpdcei.4 threads 1 dpio.18 dpdcei.5 threads 1
+sha1sum input-file uncomp_out_*

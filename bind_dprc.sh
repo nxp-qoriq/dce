@@ -8,10 +8,10 @@ DPRC=/sys/bus/fsl-mc/devices/$1
 HUGE=$(grep -E '/mnt/\<hugepages\>.*hugetlbfs' /proc/mounts)
 if [[ -z $HUGE ]]
 then
-        cd /mnt
-        mkdir hugepages
-        cd ~
-        mount -t hugetlbfs none /mnt/hugepages
+	echo mounting hugepages
+	mkdir -p /mnt/hugepages
+	mount -t hugetlbfs none /mnt/hugepages
+
 else
         echo "Already mounted :  " $HUGE
         echo

@@ -255,6 +255,9 @@ static int dpaa2_dce_pull_dequeue_rx(struct dpdcei *dpdcei)
 		pull_count++;
 		do {
 			enum dce_cmd cmd;
+#ifdef DEBUG
+			static struct dpaa2_dq prev_dq;
+#endif
 
 			/* Grab frame by frame from store */
 			do {
@@ -263,8 +266,22 @@ static int dpaa2_dce_pull_dequeue_rx(struct dpdcei *dpdcei)
 			/* is_last or dq is true */
 
 			if (dq) { /* Valid dq was received */
+#ifdef DEBUG
+				static struct dpaa2_fd prev_fd;
+#endif
 				/* Obtain FD and process it */
 				fd = dpaa2_dq_fd(dq);
+#ifdef DEBUG
+				if (prev_fd.simple.addr_lo
+						== fd->simple.addr_lo) {
+					pr_err("The following was the last previously saved dequeue entry\n");
+					hexdump(&prev_dq, sizeof(prev_dq));
+					getchar();
+				}
+				prev_dq = *dq;
+				prev_fd = *fd;
+#endif
+
 				/* We are already CPU-affine, and since we
 				 * aren't going to start more than one Rx thread
 				 * per CPU, we're good enough for now */
@@ -301,6 +318,12 @@ static int dpaa2_dce_pull_dequeue_rx(struct dpdcei *dpdcei)
 					 * Record*/
 					flow = (struct dce_flow *)fd_get_flc_64(
 							fd);
+#ifdef DEBUG
+					if (!flow) {
+						pr_err("Received a frame with no Flow informaiton. Paused for debug\n");
+						getchar();
+					}
+#endif
 					break;
 
 				default:
@@ -387,14 +410,8 @@ static int dpdcei_unbind_dpio(struct dpdcei *dpdcei,
 				struct fsl_mc_io *mc_io,
 				uint32_t cmd_flags)
 {
-	int err;
-
-	err = dpdcei_open(mc_io, cmd_flags, dpdcei->attr.id,
-				&dpdcei->token);
-	if (err) {
-		pr_err("%d from dpdcei_open() in %s\n", err, __func__);
-		return err;
-	}
+	(void)mc_io;
+	(void)cmd_flags;
 	dpdcei->notif_ctx_rx.qman64 = 0;
 	dpdcei->notif_ctx_rx.dpio_id = 0;
 
@@ -628,12 +645,6 @@ void dpdcei_cleanup(struct dpdcei *dpdcei)
 	err = dpdcei_dpio_service_teardown(dpdcei);
 	if (err)
 		pr_err("%d received from dpdcei_dpio_service_teardown() in %s\n",
-				err, __func__);
-
-	err = dpdcei_open(mc_io, MC_CMD_FLAG_PRI, dpdcei->attr.id,
-			&dpdcei->token);
-	if (err)
-		pr_err("error %d in %s in attempt to dpdcei_open(comp)\n",
 				err, __func__);
 
 	err = dpdcei_disable(mc_io, MC_CMD_FLAG_PRI, dpdcei->token);

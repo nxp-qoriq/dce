@@ -218,8 +218,7 @@ struct dpaa2_io *dpaa2_io_create(int dpio_id, int cpu)
 	dpio->dpio_desc.cpu = cpu;
 
 	vfio_force_rescan();
-	err = dpio_set_stashing_destination(mc_io, 0, dpio_token,
-						4+(cpu>>1));
+	err = dpio_set_stashing_destination(mc_io, 0, dpio_token, cpu / 2);
 	/* The stashing destination is based on the CPU cluster which is 4 + the
 	 * cpu/2 since every two cores share a stashing destination
 	 */
@@ -233,6 +232,13 @@ struct dpaa2_io *dpaa2_io_create(int dpio_id, int cpu)
 	err = dpio_enable(mc_io, 0, dpio_token);
 	if (err) {
 		pr_err("error %d in %s in attempt to dpio_enable()\n",
+				err, __func__);
+		goto err_dpio_open;
+	}
+
+	err = dpio_close(mc_io, 0, dpio_token);
+	if (err) {
+		pr_err("error %d in %s in attempt to dpio_close()\n",
 				err, __func__);
 		goto err_dpio_open;
 	}
@@ -258,7 +264,8 @@ struct dpaa2_io *dpaa2_io_create(int dpio_id, int cpu)
 	dpio->swp_desc.idx = dpio_id;
 	dpio->swp_desc.eqcr_mode = qman_eqcr_vb_array;
 	dpio->swp_desc.irq = 0;
-	dpio->swp_desc.qman_version = dpio_attr.qbman_version;
+#define QMAN_REV_4101   0x04010001
+	dpio->swp_desc.qman_version = QMAN_REV_4101 /*dpio_attr.qbman_version*/;
 	dpio->swp = qbman_swp_init(&dpio->swp_desc);
 	if (!dpio->swp) {
 		pr_err("qbman_swp_init() failed in %s\n", __func__);
@@ -640,15 +647,28 @@ int dpaa2_io_service_enqueue_fq(struct dpaa2_io *d,
 {
 	int res;
 	struct qbman_eq_desc ed;
+#ifdef DEBUG
+	static uint64_t address;
+	static uint64_t start;
 
+	if (start == (uint64_t)NULL && dpaa2_fd_get_addr(fd) > 0xA11D0FF)
+		start = dpaa2_fd_get_addr(fd);
+#endif
 	d = service_select(d);
 	if (!d)
 		return -ENODEV;
 	qbman_eq_desc_clear(&ed);
 	qbman_eq_desc_set_no_orp(&ed, 0);
 	qbman_eq_desc_set_fq(&ed, fqid);
+#ifdef DEBUG
+	if (start != (uint64_t)NULL && address + 0x180 != dpaa2_fd_get_addr(fd) &&
+			dpaa2_fd_get_addr(fd) !=  start)
+		pr_err("FD store start is 0x%" PRIx64 " and we got fd addr %p and the previous fd addr was 0x%" PRIx64 "\n",
+				start, dpaa2_fd_get_addr, address);
+	address = dpaa2_fd_get_addr(fd);
+#endif
 	res = qbman_swp_enqueue(d->swp, &ed, (const struct qbman_fd*)fd);
-#ifdef debug
+#ifdef DEBUG
 	if (dpaa2_fd_list == dpaa2_fd_get_format(fd))
 		pr_info("DEBUG: This frame is a frame list. The final bit on the third frame is set to %s\n",
 			dpaa2_sg_is_final(
