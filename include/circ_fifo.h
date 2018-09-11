@@ -76,7 +76,9 @@ static inline void circ_fifo_free(struct circ_fifo *fifo)
 		assert(false);
 		return;
 	}
+	pthread_mutex_lock(&fifo->free_lock);
 	fifo->freer = (fifo->freer + 1) % (2 * fifo->num_bufs);
+	pthread_mutex_unlock(&fifo->free_lock);
 }
 
 static inline void *circ_fifo_head(struct circ_fifo *fifo)

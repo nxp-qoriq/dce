@@ -4,6 +4,7 @@
  * All rights reserved.
  */
 #include <compat.h>
+#include <sys/sysinfo.h>
 #include <semaphore.h>
 #include <fsl_dprc.h>
 #include <vfio_utils.h>
@@ -130,6 +131,7 @@ static void *worker_dq(void *__context)
 	sem_init(&work_done_sem,
 			0 /* semaphore shared within process */,
 			0 /* Semaphore start value */);
+	debug(1, "Running on core %d\n", sched_getcpu());
 
 	while (!context->dequeue_stop || context->eq > context->dq) {
 		struct timespec time;
@@ -150,6 +152,8 @@ static void *worker_dq(void *__context)
 					if (context->eq - context->dq) {
 						debug(0, "ERROR: Timed out while waiting for %d dequeues\n",
 						     context->eq - context->dq);
+						debug(0, "PAUSED FOR DEBUG\n");
+						getchar();
 						context->stop = true;
 						pthread_exit(NULL);
 					}
@@ -407,6 +411,7 @@ static void *worker_func(void *__context)
 	snprintf(thread_name, sizeof(thread_name), "%d_eq", context->idx);
 	pthread_setname_np(context->pid, thread_name);
 	debug(3, "Worker %d at start line\n", context->idx);
+	debug(1, "Running on core %d\n", sched_getcpu());
 
 	context->mem = malloc(sizeof(*context->mem));
 	assert(context->mem);
@@ -446,7 +451,18 @@ static void *worker_func(void *__context)
 			0 /* Semaphore start value */);
 
 	/* create dequeue worker */
-	pthread_create(&dequeuer, NULL, worker_dq, context);
+	pthread_attr_t thread_attr;
+	int i;
+	cpu_set_t cpu;
+	CPU_ZERO(&cpu);
+	for (i = 0; i < get_nprocs(); i++)
+		CPU_SET(i, &cpu);
+	pthread_attr_init(&thread_attr);
+	/* We inherit the enqueuer affinity by default in phtread_create() the
+	 * work done below removes the affinity mask of the enqueuer thread to
+	 * allow the enqueuer and consumer threads to work side by side  */
+	pthread_attr_setaffinity_np(&thread_attr, sizeof(cpu_set_t), &cpu);
+	pthread_create(&dequeuer, &thread_attr, worker_dq, context);
 
 	sync_all(); /* Wait at the start line */
 
@@ -486,7 +502,9 @@ static void *worker_func(void *__context)
 
 		ret = dce_enqueue_fd_pair(context->session, &op);
 		if (ret == -EBUSY) {
+			printf("WE ARE GETTING EBUSY!!!\n");
 			msleep(1); /* Give DCE a breather */
+			getchar();
 			continue;
 		} else if (ret == -EACCES) {
 			debug(1, "Enqueuer sees that session is in suspend. Sleeping until the session is recovered\n");
@@ -540,11 +558,10 @@ static void *worker_func(void *__context)
 						rx_min = frame_count;
 					rx_avg = ((reads * rx_avg) + frame_count) / (reads + 1);
 					reads++;
-					usleep(3000);
 				}
 				usleep(100);
 				if (context->dq == context->eq)
-					pr_info("DCE all caught up! Send work faster!\n");
+					debug(1, "DCE all caught up! Send work faster!\n");
 			} while (context->eq > context->dq + 300);
 		}
 
@@ -552,7 +569,7 @@ static void *worker_func(void *__context)
 			extern int interrupt_count;
 
 			context->dequeue_stop = true;
-			debug(0, "Received stop signal. Waiting for %d outstanding work requests\n",
+			debug(0, "Done work. Waiting for %d outstanding work requests before exit\n",
 					context->eq - context->dq);
 			pthread_join(dequeuer, NULL /* no need retval */);
 			assert(context->eq == context->dq);
@@ -580,6 +597,8 @@ static void *worker_func(void *__context)
 			chunk = list_entry(context->chunk_list->next,
 					typeof(*chunk), node);
 	}
+	debug(0, "Bytes processed = %zu, Bytes produced = %zu\n",
+			context->total_in, context->total_out);
 	return NULL; /* Thread exit */
 }
 
@@ -648,7 +667,7 @@ int main(int argc, char *argv[])
 	struct dma_mem dce_mem;
 	enum dce_paradigm paradigm = DCE_STATEFUL_RECYCLE;
 	enum dce_compression_format format = DCE_CF_GZIP;
-	unsigned int test_time = 10; /* 10 seconds by default */
+	unsigned int test_time = 2; /* 2 seconds by default */
 
 	struct fsl_mc_io *mc_io;
 	uint16_t dprc_token;
@@ -869,31 +888,12 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
+	uint16_t root_token = dprc_token;
+
 	ret = dprc_open(mc_io, 0, dprc_id, &dprc_token);
 	if (ret) {
 		pr_err("%d from dprc_open() failed in %s\n", ret, __func__);
 		exit(EXIT_FAILURE);
-	}
-
-	list_for_each_entry(dpio_context, &dpio_list, node) {
-		struct dpdcei_context *dpdcei_context;
-		ret = dpio_open(mc_io, 0, dpio_context->id,
-				&dpio_context->token);
-		if (ret) {
-			pr_err("%d from dpio_open() failed in %s\n",
-					ret, __func__);
-			exit(EXIT_FAILURE);
-		}
-		list_for_each_entry(dpdcei_context, &dpio_context->dpdcei_list,
-				node) {
-			ret = dpdcei_open(mc_io, 0, dpdcei_context->id,
-					&dpdcei_context->token);
-			if (ret) {
-				pr_err("%d from dpdcei_open() failed in %s\n",
-						ret, __func__);
-				exit(EXIT_FAILURE);
-			}
-		}
 	}
 
 	ret = vfio_setup(dprc_id_str);
@@ -901,6 +901,9 @@ int main(int argc, char *argv[])
 		pr_err("vfio_setup() failed\n");
 		exit(EXIT_FAILURE);
 	}
+
+	dprc_close(mc_io, 0, dprc_token);
+	dprc_close(mc_io, 0, root_token);
 
 	if (input_file) {
 		fseek(input_file, 0L, SEEK_END);
@@ -991,10 +994,11 @@ int main(int argc, char *argv[])
 	memset(contexts, 0, num_threads * sizeof(struct work_context));
 
 	i = 0;
+	int cpu_count = 0;
 	list_for_each_entry(dpio_context, &dpio_list, node) {
 		struct dpdcei_context *dpdcei_context;
 
-		dpio_context->dpio = dpaa2_io_create(dpio_context->id, -1);
+		dpio_context->dpio = dpaa2_io_create(dpio_context->id, cpu_count);
 		if (!dpio_context->dpio) {
 			pr_err("dpio setup failed\n");
 			exit(EXIT_FAILURE);
@@ -1047,8 +1051,16 @@ int main(int argc, char *argv[])
 							ret);
 					exit(EXIT_FAILURE);
 				}
+				pthread_attr_t thread_attr;
+				cpu_set_t cpu;
+				CPU_ZERO(&cpu);
+				CPU_SET(cpu_count, &cpu);
+				pthread_attr_init(&thread_attr);
+				pthread_attr_setaffinity_np(&thread_attr,
+						sizeof(cpu_set_t),
+						&cpu);
 
-				ret = pthread_create(&contexts[i].pid, NULL,
+				ret = pthread_create(&contexts[i].pid,&thread_attr,
 						worker_func, &contexts[i]);
 				if (ret) {
 					pr_err("pthread_create failed with ret code %d\n",
@@ -1057,6 +1069,9 @@ int main(int argc, char *argv[])
 				}
 			}
 		}
+		/* Each cpu cluster share cache and so we increment two at a
+		 * time to lower cache contention */
+		cpu_count += 2 % get_nprocs();
 	}
 	/* Wait for all threads to sleep on starting line */
 	usleep(100000);
@@ -1125,7 +1140,7 @@ int main(int argc, char *argv[])
 		list_for_each_entry(dpdcei_context, &dpio_context->dpdcei_list,
 					node)
 			dpdcei_cleanup(dpdcei_context->dpdcei);
-		dpaa2_io_destroy(dpio_context->dpio);
+		/*dpaa2_io_destroy(dpio_context->dpio);*/
 	}
 
 	Mbps = Mbps * 8 /* bits per byte */ / test_time_us;

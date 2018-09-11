@@ -1,0 +1,37 @@
+#!/bin/bash
+
+# Script runs commands to prepare DPAA2 objects for the DCE test
+# application.  See README.
+
+sudo restool dprc create dprc.1 --label="DCE test dprc"
+
+sudo restool dpio create
+sudo restool dpio create
+sudo restool dpio create
+
+sudo restool dpdcei create --priority=1 --engine=DPDCEI_ENGINE_COMPRESSION
+sudo restool dpdcei create --priority=1 --engine=DPDCEI_ENGINE_COMPRESSION
+sudo restool dpdcei create --priority=1 --engine=DPDCEI_ENGINE_COMPRESSION
+
+sudo restool dpdcei create --priority=1 --engine=DPDCEI_ENGINE_DECOMPRESSION
+sudo restool dpdcei create --priority=1 --engine=DPDCEI_ENGINE_DECOMPRESSION
+sudo restool dpdcei create --priority=1 --engine=DPDCEI_ENGINE_DECOMPRESSION
+
+sleep 1
+sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpio.16 --plugged=1
+sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpio.17 --plugged=1
+sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpio.18 --plugged=1
+
+sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpdcei.0 --plugged=1
+sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpdcei.1 --plugged=1
+sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpdcei.2 --plugged=1
+
+sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpdcei.3 --plugged=1
+sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpdcei.4 --plugged=1
+sudo restool dprc assign dprc.1 --child=dprc.2 --object=dpdcei.5 --plugged=1
+
+sleep 1
+sudo restool dprc show dprc.2
+
+sudo ./bind_dprc.sh dprc.2
+

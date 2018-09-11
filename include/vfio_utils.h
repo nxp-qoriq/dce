@@ -18,6 +18,7 @@ int vfio_cleanup_dma(void *vaddr, uint64_t dma_size);
 
 #define PORTAL_MEM_CENA 0
 #define PORTAL_MEM_CINH 1
+#define PORTAL_MEM_MB_CENA 2
 void *vfio_map_portal_mem(const char *device, int memtype);
 
 int vfio_dma_map_area(uint64_t vaddr, uint64_t offset, ssize_t size);
