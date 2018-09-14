@@ -1,41 +1,26 @@
-CROSS_COMPILE ?=
+ARCH ?= aarch64
+CROSS_COMPILE ?= $(ARCH)-linux-gnu-
 DESTDIR ?=
 
 CC = $(CROSS_COMPILE)gcc
 AR = $(CROSS_COMPILE)ar
 
-OBJS = dce.o \
-       dce-fd-frc.o \
-       dce-fd.o \
-       dce-fcr.o \
-       lib/fsl_mc_sys.o \
-       lib/dprc.o \
-       lib/dpio.o \
-       lib/dpdcei.o \
-       lib/vfio_utils.o \
-       lib/allocator.o \
-       lib/dpio_service.o \
-       dce-scf-compression.o \
-       dce-scf-decompression.o \
-       dpdcei-drv.o \
+OBJS = $(patsubst %.c, %.o, $(wildcard *.c lib/*.c))
 
-CFLAGS = -Iinclude \
-	 -Ilib/qbman_userspace/include \
-	 -D_GNU_SOURCE \
-	 -O2 \
-	 -pthread \
-	 ${EXTRA_CFLAGS} \
-	 -Wall \
-	 -Wextra -Wformat \
-	 -std=gnu99 \
-	 -Wmissing-prototypes \
-	 -Wpointer-arith \
-	 -Wundef \
-	 -Wstrict-prototypes \
-	 -fdiagnostics-color
-	 #-fmax-errors=4 \
-	 # -Winline \
-	 #-Werror
+CFLAGS += -Iinclude
+CFLAGS += -Ilib/qbman_userspace/include
+CFLAGS += -D_GNU_SOURCE
+CFLAGS += -O2
+CFLAGS += -pthread
+CFLAGS += ${EXTRA_CFLAGS}
+CFLAGS += -Wall
+CFLAGS += -Wextra -Wformat
+CFLAGS += -std=gnu99
+CFLAGS += -Wmissing-prototypes
+CFLAGS += -Wpointer-arith
+CFLAGS += -Wundef
+CFLAGS += -Wstrict-prototypes
+CFLAGS += -fdiagnostics-color
 
 LDFLAGS = -static -Wl,--hash-style=gnu ${EXTRA_CFLAGS}
 
@@ -77,11 +62,9 @@ clean:
 	  sed 's,\($(notdir $*)\.o\) *:,$(dir $@)\1 $@: ,' > $@.tmp); \
 	 mv $@.tmp $@
 
-export ARCH=aarch64
-
 libqbman.a:
-	cd lib/qbman_userspace && $(MAKE)
-	cp lib/qbman_userspace/lib_aarch64_static/libqbman.a .
+	cd lib/qbman_userspace && make clean && $(MAKE)
+	cp lib/qbman_userspace/lib_$(ARCH)_static/libqbman.a .
 
 -include $(HEADER_DEPENDENCIES)
 
