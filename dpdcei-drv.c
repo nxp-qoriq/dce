@@ -229,6 +229,7 @@ int enqueue_fd(struct dce_flow *flow, struct dpaa2_fd *fd)
 EXPORT_SYMBOL(enqueue_fd);
 
 int interrupt_count;
+unsigned int dequeue_count;
 
 static int dpaa2_dce_pull_dequeue_rx(struct dpdcei *dpdcei)
 {
@@ -326,6 +327,7 @@ static int dpaa2_dce_pull_dequeue_rx(struct dpdcei *dpdcei)
 				default:
 					pr_err("DCE: Unsupported DCE CMD %d\n", cmd);
 				}
+				dequeue_count++;
 				atomic_dec(&dpdcei->frames_in_flight);
 				atomic_dec(&flow->frames_in_flight);
 				flow->cb(flow, cmd, fd);

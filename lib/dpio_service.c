@@ -243,9 +243,13 @@ struct dpaa2_io *dpaa2_io_create(int dpio_id, int cpu)
 		goto err_dpio_open;
 	}
 
+	/* Define the qman version temporarily here. To be removed once
+	 * qbman_userspace library moves this define to fsl_qbman_portal.h */
+#define QMAN_REV_5000   0x05000000
 	sprintf(dpio_id_str, "dpio.%i", dpio_id);
 	dpio->swp_desc.cena_bar = vfio_map_portal_mem(dpio_id_str,
-							PORTAL_MEM_CENA);
+				    dpio_attr.qbman_version < QMAN_REV_5000 ?
+				    PORTAL_MEM_CENA : PORTAL_MEM_MB_CENA);
 	if (!dpio->swp_desc.cena_bar) {
 		pr_err("error %d in %s in attempt to vfio_map_portal_mem() cache enabled area\n",
 				err, __func__);
@@ -264,8 +268,7 @@ struct dpaa2_io *dpaa2_io_create(int dpio_id, int cpu)
 	dpio->swp_desc.idx = dpio_id;
 	dpio->swp_desc.eqcr_mode = qman_eqcr_vb_array;
 	dpio->swp_desc.irq = 0;
-#define QMAN_REV_4101   0x04010001
-	dpio->swp_desc.qman_version = QMAN_REV_4101 /*dpio_attr.qbman_version*/;
+	dpio->swp_desc.qman_version = dpio_attr.qbman_version;
 	dpio->swp = qbman_swp_init(&dpio->swp_desc);
 	if (!dpio->swp) {
 		pr_err("qbman_swp_init() failed in %s\n", __func__);
@@ -403,7 +406,6 @@ int dpaa2_io_irq(struct dpaa2_io *obj)
 		dq = qbman_swp_dqrr_next(swp);
 	}
 	qbman_swp_interrupt_clear_status(swp, status);
-	qbman_swp_interrupt_set_inhibit(swp, 0);
 	return IRQ_HANDLED;
 }
 EXPORT_SYMBOL(dpaa2_io_irq);

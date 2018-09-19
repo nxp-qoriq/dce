@@ -18,13 +18,18 @@ struct chunk {
 	struct list_head node;
 };
 
+enum suspend_policy {
+	CONTINUE = 0,
+	ABORT = 1,
+};
+
 struct work_context {
 	pthread_t pid;
 	struct dce_session *session;
 	struct list_head *chunk_list;
 	const char *out_file;
-	unsigned int eq;
-	unsigned int dq;
+	atomic_t eq;
+	atomic_t dq;
 	size_t total_in;
 	size_t total_out;
 	struct dma_mem *mem;
@@ -34,6 +39,7 @@ struct work_context {
 	bool dequeue_stop;
 	uint64_t end_time;
 	bool synchronous;
+	enum suspend_policy stream_suspend_policy;
 	unsigned int recycle_interval;
 	bool recycle_sleep;
 	sem_t sync_sem;
@@ -93,6 +99,7 @@ size_t max_decomp_ratio = 30; /* default maximum decompression ratio is 30, It
 			       * data expands to more than 30 times the input
 			       * size
 			       */
+size_t min_output_buf = 7;
 
 static void sync_all(void);
 
@@ -133,8 +140,9 @@ static void *worker_dq(void *__context)
 			0 /* Semaphore start value */);
 	debug(1, "Running on core %d\n", sched_getcpu());
 
-	while (!context->dequeue_stop || context->eq > context->dq) {
+	while (!context->dequeue_stop || (atomic_read(&context->eq) > atomic_read(&context->dq))) {
 		struct timespec time;
+		uint32_t frame_count_tx, frame_count_rx, byte_count;
 		struct dce_op_fd_pair_rx ops[16];
 
 		num_ops = dce_dequeue_fd_pair(context->session, ops, 16);
@@ -145,13 +153,21 @@ static void *worker_dq(void *__context)
 						&work_done_sem);
 				if (clock_gettime(CLOCK_REALTIME, &time) == -1)
 					exit(EXIT_FAILURE);
-				time.tv_sec += 1; /* Wait up to 1 second */
+				time.tv_sec += 15; /* Wait up to 1 second */
 				debug(3, "Dequeuer going to sleep for 1 sec max waiting for frames\n");
 				if (sem_timedwait(&work_done_sem, &time)) {
 					assert(errno == ETIMEDOUT);
-					if (context->eq - context->dq) {
+					if (atomic_read(&context->eq) - atomic_read(&context->dq)) {
 						debug(0, "ERROR: Timed out while waiting for %d dequeues\n",
-						     context->eq - context->dq);
+						     atomic_read(&context->eq) - atomic_read(&context->dq));
+						dpaa2_io_query_fq_count(context->session->flow.dpdcei->dpio_p,
+								context->session->flow.dpdcei->tx_fqid,
+								&frame_count_tx, &byte_count);
+						dpaa2_io_query_fq_count(context->session->flow.dpdcei->dpio_p,
+								context->session->flow.dpdcei->rx_fqid,
+								&frame_count_rx, &byte_count);
+						debug(0, "The number of frames on the Tx frame queue is %"PRIu32" and the Rx frame queue is %"PRIu32"\n",
+						     frame_count_tx, frame_count_rx);
 						debug(0, "PAUSED FOR DEBUG\n");
 						getchar();
 						context->stop = true;
@@ -171,26 +187,21 @@ static void *worker_dq(void *__context)
 			int ret;
 
 			debug(5, "frame dq %u has status 0x%x, %s, input was %u bytes, of which %zu bytes were consumed, %u bytes of output\n",
-					context->dq, op->status,
+					atomic_read(&context->dq), op->status,
 					dce_status_string(op->status),
 					dpaa2_fd_get_len(&op->input_fd),
 					op->input_consumed,
 					dpaa2_fd_get_len(&op->output_fd));
-#ifdef NOP_TEST
-			context->total_out += 0;
-#else
-			context->total_out += dpaa2_fd_get_len(&op->output_fd);
-#endif
 			/* The input_fd frc is not used by DCE, We get it here
 			 * as a token and check it for sanity
 			 */
-			if (dpaa2_fd_get_frc(&op->input_fd) != context->dq) {
+			/*if (dpaa2_fd_get_frc(&op->input_fd) != atomic_read(&context->dq)) {
 				debug(0, "Dequeueing frames out of order. Expected %u and read %u\n",
-					context->dq,
+					atomic_read(&context->dq),
 					dpaa2_fd_get_frc(&op->input_fd));
 				assert(dpaa2_fd_get_frc(
-						&op->input_fd) == context->dq);
-			}
+						&op->input_fd) == atomic_read(&context->dq));
+			}*/
 
 			switch (op->status) {
 				struct dce_op_fd_pair_tx recycle_op;
@@ -213,6 +224,10 @@ static void *worker_dq(void *__context)
 						debug(0, "ERROR on closing output file\n");
 					out_stream = NULL;
 				}
+				context->total_in +=
+					dpaa2_fd_get_len(&op->input_fd);
+				context->total_out +=
+					dpaa2_fd_get_len(&op->output_fd);
 				if (context->synchronous)
 					/* Signal enqueuer dequeue is done */
 					sem_post(&context->sync_sem);
@@ -232,15 +247,18 @@ static void *worker_dq(void *__context)
 						out_stream = NULL;
 					}
 				}
+				context->total_in +=
+					dpaa2_fd_get_len(&op->input_fd);
+				context->total_out +=
+					dpaa2_fd_get_len(&op->output_fd);
 				if (context->synchronous)
 					/* Signal enqueuer that dequeue is done */
 					sem_post(&context->sync_sem);
 				break;
 			case MEMBER_END_SUSPEND:
 			case OUTPUT_BLOCKED_SUSPEND:
-
-				debug(1, "Output choked on frame %u because the out buffer was too small\n",
-						context->dq);
+				debug(0, "Output choked on frame %u because the out buffer was too small. Enqueuer is blocked at %u\n",
+						atomic_read(&context->dq), atomic_read(&context->eq));
 				if (out_stream) {
 					ret = fwrite((void *)dpaa2_fd_get_addr(&op->output_fd),
 						1 /* Unit size is 1 byte */,
@@ -253,13 +271,15 @@ static void *worker_dq(void *__context)
 						out_stream = NULL;
 					}
 				}
-				/* We should use stream continue instead of
-				 * stream abort, because this application
-				 * supports compression and decompression. If we
-				 * are doing compression only then we can use
-				 * stream_abort() and then the recycle frame
+
+				context->total_in += op->input_consumed;
+				context->total_out +=
+					dpaa2_fd_get_len(&op->output_fd);
+
+				/* If we are doing compression only then we can
+				 * use stream_abort() and then the recycle frame
 				 * will be considered the start of a new stream.
-				 * In decompression, the stream head cannot
+				 * In decompression, the stream head cannot be
 				 * arbitrarily chosen in the middle of a data
 				 * stream, the DCE expects specially formatted
 				 * headers and will return an error if we
@@ -268,7 +288,9 @@ static void *worker_dq(void *__context)
 				 * are very lucky and it so happens that the
 				 * processing of the data stopped right on the
 				 * boundary between streams */
-				dce_stream_continue(context->session);
+				context->stream_suspend_policy == CONTINUE ?
+					dce_stream_continue(context->session) :
+					dce_stream_abort(context->session);
 
 				recycle_op.input_fd = &op->input_fd;
 				recycle_op.output_fd = &op->output_fd;
@@ -280,11 +302,14 @@ static void *worker_dq(void *__context)
 				dpaa2_fd_set_addr(recycle_op.input_fd,
 					op->input_consumed
 					+ dpaa2_fd_get_addr(&op->input_fd));
+
 				/* Update the input length to reflect the bytes
 				 * that have already processed */
 				dpaa2_fd_set_len(recycle_op.input_fd,
 					dpaa2_fd_get_len(&op->input_fd)
 					- op->input_consumed);
+
+
 				/* Update the output length to accommodate the
 				 * extra data that did not fit. Note that
 				 * This suspend was triggered intentionally by
@@ -308,29 +333,33 @@ static void *worker_dq(void *__context)
 				 * it here as a token and read it on the other
 				 * side to ensure order */
 				dpaa2_fd_set_frc(recycle_op.input_fd,
-						context->eq);
+						atomic_read(&context->eq));
 
 				while ((ret = dce_recycle_fd_pair(
 					context->session, &recycle_op))) {
 					if (ret != -EBUSY)
 						break;
 				}
+				atomic_inc(&context->eq);
 				assert(ret >= 0);
 				debug(5, "frame %u flush %s, input %u bytes, output %u bytes\n",
-					context->eq,
+					atomic_read(&context->eq),
 					recycle_op.flush == DCE_Z_FINISH ? "Z_FINISH" :
 					recycle_op.flush == DCE_Z_NO_FLUSH ? "Z_NO_FLUSH" :
 									"UNKNOWN",
 					dpaa2_fd_get_len(recycle_op.input_fd),
 					dpaa2_fd_get_len(recycle_op.output_fd));
-				context->eq++;
+				if (ret == 1)
+					debug(0, "Exited recycle at frame %u\n",
+						atomic_read(&context->eq));
 				if (ret == 1 && context->recycle_sleep)
 					/* The session is out of suspend */
 					wake_up(&context->recycle_finished);
 				break;
 			case SKIPPED:
 				debug(1, "frame %u returned as is because the session is suspended\n",
-						context->dq);
+						atomic_read(&context->dq));
+
 				recycle_op.input_fd = &op->input_fd;
 				recycle_op.output_fd = &op->output_fd;
 				recycle_op.flush = op->flush;
@@ -343,29 +372,41 @@ static void *worker_dq(void *__context)
 				 * it here as a token and read it on the other
 				 * side to ensure order */
 				dpaa2_fd_set_frc(recycle_op.input_fd,
-						context->eq);
+						atomic_read(&context->eq));
 
 				while ((ret = dce_recycle_fd_pair(
 					context->session, &recycle_op))) {
 					if (ret != -EBUSY)
 						break;
 				}
+				atomic_inc(&context->eq);
+				/* FIXME: This assert can legally trigger if a
+				 * call to dequeue_fd() returns the last skipped
+				 * frames in addition to another
+				 * OTUPUT_BLOCKED_SUSPEND. to resolve this we
+				 * can either call dequeue_fd() with only space
+				 * for one op or we can try to make sure we do
+				 * not trigger a double within the pull window
+				 * of 16 fds */
 				assert(ret >= 0);
 				debug(5, "frame %u flush %s, input %u bytes, output %u bytes\n",
-					context->eq,
+					atomic_read(&context->eq),
 					recycle_op.flush == DCE_Z_FINISH ? "Z_FINISH" :
 					recycle_op.flush == DCE_Z_NO_FLUSH ? "Z_NO_FLUSH" :
 									"UNKNOWN",
 					dpaa2_fd_get_len(recycle_op.input_fd),
 					dpaa2_fd_get_len(recycle_op.output_fd));
-				context->eq++;
-				if (ret == 1 && context->recycle_sleep)
+				if (ret == 1)
+					debug(0, "Exited recycle at frame %u\n",
+						atomic_read(&context->eq));
+				if (ret == 1 && context->recycle_sleep) {
 					/* The session is out of suspend */
 					wake_up(&context->recycle_finished);
+				}
 				break;
 			default:
 				if (context->recycle_sleep)
-					/* sho not be here unless in async */
+					/* should not be here unless in async */
 					sem_post(&context->recycle_finished);
 				else if (context->synchronous)
 					/* Signal enqueuer that dequeue done */
@@ -376,7 +417,7 @@ static void *worker_dq(void *__context)
 					context->stop = true;
 				}
 			}
-			context->dq++;
+			atomic_inc(&context->dq);
 		}
 	}
 	if (out_stream)
@@ -435,8 +476,13 @@ static void *worker_func(void *__context)
 
 	/* We use this frame to trigger OUTPUT_BLOCKED_SUSPEND */
 	too_small_output_fd = output_fd;
-	dpaa2_fd_set_len(&too_small_output_fd, chunk_size / max_decomp_ratio);
+	dpaa2_fd_set_len(&too_small_output_fd,
+			(chunk_size / max_decomp_ratio) > min_output_buf ?
+			chunk_size / max_decomp_ratio : min_output_buf);
 	assert(dpaa2_fd_get_len(&too_small_output_fd));
+	if (context->recycle_interval)
+		debug(0, "The choke output buffer length is %"PRIu32"\n",
+			dpaa2_fd_get_len(&too_small_output_fd));
 
 	context->total_in = 0;
 	context->total_out = 0;
@@ -475,9 +521,13 @@ static void *worker_func(void *__context)
 		dpaa2_fd_set_len(&input_fd, chunk->size);
 		op.input_fd = &input_fd;
 		/* Recycle mode testing */
-		if (context->recycle_interval)
-			op.output_fd = (context->eq + 1) % context->recycle_interval ?
+		if (context->recycle_interval) {
+			op.output_fd = (atomic_read(&context->eq) + 1) % context->recycle_interval ?
 						&output_fd : &too_small_output_fd;
+			if (op.output_fd == &too_small_output_fd)
+				debug(1, "Using %u output length to attempt to trigger OUTPUT_BLOCKED_SUSPEND\n",
+						dpaa2_fd_get_len(op.output_fd));
+		}
 		else
 			op.output_fd = &output_fd;
 		op.flush  = last_chunk ? DCE_Z_FINISH : DCE_Z_NO_FLUSH;
@@ -498,13 +548,12 @@ static void *worker_func(void *__context)
 		 * mode the enqueuer goes to sleep waiting on the recycle
 		 * semaphore and the loop logic rereads the context->eq
 		 */
-		dpaa2_fd_set_frc(&input_fd, context->eq);
+		dpaa2_fd_set_frc(&input_fd, atomic_read(&context->eq));
 
 		ret = dce_enqueue_fd_pair(context->session, &op);
 		if (ret == -EBUSY) {
 			printf("WE ARE GETTING EBUSY!!!\n");
 			msleep(1); /* Give DCE a breather */
-			getchar();
 			continue;
 		} else if (ret == -EACCES) {
 			debug(1, "Enqueuer sees that session is in suspend. Sleeping until the session is recovered\n");
@@ -524,18 +573,19 @@ static void *worker_func(void *__context)
 			context->ret = ret;
 			pthread_exit(NULL);
 		}
+		atomic_inc(&context->eq);
 
 		debug(5, "frame %u has initial %s, flush %s, input %u bytes, output %u bytes\n",
-			context->eq,
+			atomic_read(&context->eq),
 			chunk->node.prev == context->chunk_list ?
 				"true" : "false",
 			last_chunk ? "Z_FINISH" : "Z_NO_FLUSH",
 			dpaa2_fd_get_len(&input_fd),
 			dpaa2_fd_get_len(&output_fd));
-		context->eq++;
-		context->total_in += chunk->size;
 
-		if (context->eq > context->dq + 2000) {
+		unsigned int flow_max = 1000;
+
+		if (atomic_read(&context->eq) > atomic_read(&context->dq) + flow_max) {
 			bool sampled = false;
 
 			do  {
@@ -560,9 +610,9 @@ static void *worker_func(void *__context)
 					reads++;
 				}
 				usleep(100);
-				if (context->dq == context->eq)
+				if (atomic_read(&context->dq) == atomic_read(&context->eq))
 					debug(1, "DCE all caught up! Send work faster!\n");
-			} while (context->eq > context->dq + 300);
+			} while (atomic_read(&context->eq) > atomic_read(&context->dq) + 300);
 		}
 
 		if (context->stop) {
@@ -570,9 +620,9 @@ static void *worker_func(void *__context)
 
 			context->dequeue_stop = true;
 			debug(0, "Done work. Waiting for %d outstanding work requests before exit\n",
-					context->eq - context->dq);
+					atomic_read(&context->eq) - atomic_read(&context->dq));
 			pthread_join(dequeuer, NULL /* no need retval */);
-			assert(context->eq == context->dq);
+			assert(atomic_read(&context->eq) == atomic_read(&context->dq));
 			context->end_time = read_cntvct();
 			debug(0, "tx_max = %u rx_max = %u tx_min = %u rx_min = %u tx_avg = %u rx_avg = %u enqueuer got ahead %u times. Interrupt count = %d\n",
 					tx_max, rx_max, tx_min, rx_min, tx_avg,
@@ -621,6 +671,7 @@ static const char STR_resources[] = "--resources";
 static const char STR_decomp_ratio[] = "--decomp-ratio=";
 static const char STR_recycle[] = "--recycle=";
 static const char STR_sync[] = "--synchronous";
+static const char STR_suspend_policy[] = "--suspend-policy=";
 static const char STR_debug[] = "-d";
 
 static const char STR_usage[] =
@@ -637,6 +688,11 @@ static const char STR_usage[] =
 "    --synchronous   Send only one operation per thread at a time. Impacts throughput\n"
 "    --chunk-size=<size> Chunk size to send to DCE per operation\n"
 "    --time=<time-in-sec> Run the test for given number of seconds\n"
+"    --suspend-policy=<policy>   continue, abort\n"
+"                                Continue or abort streams when suspended. Only valid if paradigm=stateful-recycle\n"
+"                                `continue' logical stream i.e. file\n"
+"                                `abort' discard stream history and treat next data as a new stream\n"
+"                                Note: Stream history is needed for decompression in most cases\n"
 "    --decomp-ratio=<inflate-ratio> Output buffers will be <inflate-ratio> times the input buffer size\n"
 "				    Use This option if `The output buffer supplied was too small' error report is observed\n"
 "    -d [debug_level] debug prints based on level where -d 1 is the lowest\n"
@@ -654,6 +710,7 @@ int main(int argc, char *argv[])
 	FILE *input_file = NULL;
 	const char *out_file_name = NULL;
 	bool synchronous_mode = false; /* asynchronous by default */
+	enum suspend_policy suspend_policy = CONTINUE; /* Continue by default */
 	unsigned int recycle_interval = 0; /* No recycle by default */
 	size_t file_size;
 	unsigned int num_chunks = 0;
@@ -726,10 +783,12 @@ int main(int argc, char *argv[])
 						STR_chunk_size);
 		} else if (!strncmp(*argv, STR_recycle,
 					strlen(STR_recycle))) {
-			pr_err("--recycle is not yet supported in this test\n");
-			exit(EXIT_FAILURE);
+			/*exit(EXIT_FAILURE);*/
 			recycle_interval = get_ularg(&(*argv)[strlen(STR_recycle)],
 						STR_recycle);
+			pr_info("********RECYCLE MODE ENABLED********\n"
+				"Test will attempt to force recycle every %u frames by making the output buffer very small\n",
+				recycle_interval);
 		} else if (!strncmp(*argv, STR_time,
 					strlen(STR_time))) {
 			test_time = get_ularg(&(*argv)[strlen(STR_time)],
@@ -844,6 +903,17 @@ int main(int argc, char *argv[])
 			}
 		} else if (!strncmp(*argv, STR_sync, strlen(STR_sync))) {
 			synchronous_mode = true;
+		} else if (!strncmp(*argv, STR_suspend_policy, strlen(STR_suspend_policy))) {
+			if (!strncmp(&(*argv)[strlen(STR_suspend_policy)], "continue",
+						strlen("continue")))
+				suspend_policy = CONTINUE;
+			else if (!strncmp(&(*argv)[strlen(STR_suspend_policy)], "abort",
+						strlen("abort")))
+				suspend_policy = ABORT;
+			else {
+				pr_err("Unexpected paradigm parameter\n");
+				exit(EXIT_FAILURE);
+			}
 		} else {
 			pr_err("Unrecognised argument '%s'\n"
 				"use --help to see usage \n", *argv);
@@ -1039,7 +1109,8 @@ int main(int argc, char *argv[])
 				context->out_file = out_file_name;
 				context->idx = i;
 				context->synchronous = synchronous_mode;
-				context->recycle_interval = recycle_interval;
+				context->stream_suspend_policy = suspend_policy;
+				context->recycle_interval = i ? 0 : recycle_interval;
 				context->session =
 					malloc(sizeof(*context->session));
 				ret = dce_session_create(context->session,

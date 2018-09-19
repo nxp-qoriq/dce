@@ -472,7 +472,7 @@ int dce_enqueue_fd_pair(struct dce_session *session,
 			 * enqueuers . Any other error would be an
 			 * implementation bug
 			 */
-			assert(errno == EAGAIN); /* errno is racy .. oh well*/
+			assert(errno == EAGAIN); /* errno is racy .. oh well */
 			pthread_mutex_lock(&session->lock);
 			ret = session->recycle_todo ? -EACCES : -EBUSY;
 			pthread_mutex_unlock(&session->lock);
@@ -527,7 +527,6 @@ int dce_enqueue_fd_pair(struct dce_session *session,
 	dpaa2_sg_set_final((struct dpaa2_sg_entry *)scf_fd, 1);
 	dpaa2_fd_set_addr(scf_fd, (dma_addr_t) &work_unit->scf_result);
 	dpaa2_fd_set_len(scf_fd, sizeof(struct scf_c_cfg));
-	/* Should setup steless headers here */
 
 	/* FD */
 	fd_set_ivp(fd_list, true); /* bpid is invalid */
@@ -545,13 +544,13 @@ int dce_enqueue_fd_pair(struct dce_session *session,
 	fd_frc_set_sf(fd_list, !!session->paradigm);
 	if (session->recycle) {
 		/* Why worry about the recycle bit in enqueue_() when it is
-		 * taken care of by two dedicate functions recycle_()?
+		 * taken care of by two dedicated functions recycle_()?
 		 * There is one case where this does not work. If an application
-		 * discards all outstanding operations and wishes to resume
-		 * enqueues normally. DCE will return rejections since it was
-		 * not informed of this decision. The recycle bit set here
-		 * ensures that DCE is informed so it can continue work
-		 */
+		 * calls continue() and discard()s all outstanding operations.
+		 * The session will exit recycle and the application will be
+		 * allowed to do regular enqueues. DCE will reject regular
+		 * enqueues because the session is still suspended in DCE. To
+		 * clear suspend we must set the recycle bit here */
 		fd_frc_set_recycle(fd_list, session->recycle);
 		session->recycle = false;
 	}
@@ -567,8 +566,15 @@ int dce_enqueue_fd_pair(struct dce_session *session,
 		if (op->flush == DCE_Z_FINISH)
 			session->state = STREAM_END;
 	}
-	fd_frc_set_uspc(fd_list, false);
-	fd_frc_set_uhc(fd_list, false);
+	if (session->reset) {
+		/* session->reset is addressed in the recycle_fd()
+		 * function when the user calls continue() or abort() followed
+		 * by recycle_fd(). If the application decides to call abort()
+		 * followed by discard() of all frames then this . */
+		fd_frc_set_uspc(fd_list, true);
+		session->reset = false;
+	}
+
 
 	/* Set caller context */
 	work_unit->store.context = op->user_context;
@@ -704,6 +710,8 @@ int dce_dequeue_fd_pair(struct dce_session *session,
 				assert(!ret);
 			}
 			session->recycler_allowed = false;
+			session->initial_store =
+				fd_frc_get_initial(&work_unit->fd_list);
 			session->recycle_todo += circ_fifo_num_alloc(
 					&session->fifo);
 			ops[i].input_consumed = scf_c_result_get_bytes_processed(
@@ -712,8 +720,25 @@ int dce_dequeue_fd_pair(struct dce_session *session,
 			break;
 		case SKIPPED:
 			/* DCE will never skip an op unless there was one before
-			 * it that was *_SUSPEND
-			 */
+			 * it that was *_SUSPEND. What about the case of an
+			 * application recycling the SUSPEND frame before
+			 * calling dequeue again to get the SKIPPED frame? Will
+			 * not the recycle_todo = 0? This cannot happen because
+			 * the recycle_todo is not set to 1 when a SUSPEND frame
+			 * is observed. Rather it is set to the total number of
+			 * frames in flight when the SUSPEND frame is dequeued.
+			 * This means that when we observe the SKIPPED frame
+			 * recycle_todo will be a minimum of 1 in the case of
+			 * the application recycling or discarding the SUSPEND
+			 * frame. The other case when this can happen is if the
+			 * application calls discard continuously without first
+			 * dequeueing the frames to be discarded. The last
+			 * scenario where this can occur is if the driver fails
+			 * to prevent the enqueuer from adding more frames to
+			 * the flow AFTER it has already observed the SUSPEND
+			 * frame. This is prevented in the current design with a
+			 * semaphore to lockout the enqueuer from adding to the
+			 * SKIPPED frames backlog */
 			assert(session->recycle_todo);
 			ops[i].input_consumed = 0;
 
@@ -769,7 +794,6 @@ int dce_dequeue_fd_pair(struct dce_session *session,
 }
 EXPORT_SYMBOL(dce_dequeue_fd_pair);
 
-
 int dce_stream_abort(struct dce_session *session)
 {
 	int ret;
@@ -782,11 +806,6 @@ int dce_stream_abort(struct dce_session *session)
 	assert(session->paradigm == DCE_STATEFUL_RECYCLE);
 	ret = pthread_mutex_lock(&session->lock);
 	assert(!ret);
-	/* This function should not be called twice in a row or in combination
-	 * with stream_abort()
-	 */
-	assert(!session->recycle);
-	session->recycle = true;
 	/* This function should not be called if the session did not encounter a
 	 * suspend frame
 	 */
@@ -803,6 +822,7 @@ int dce_stream_abort(struct dce_session *session)
 	 * before is unrelated to this current frame
 	 */
 	session->state = STREAM_END;
+	session->reset = true;
 	ret = pthread_mutex_unlock(&session->lock);
 	assert(!ret);
 	return 0;
@@ -837,11 +857,14 @@ int dce_stream_continue(struct dce_session *session)
 	session->recycler_allowed = true;
 	/* We change session state here because it is used during the enqueue to
 	 * determine whether to treat the next frame as a new stream or a
-	 * continuation of the suspended stream. Setting the session state to
-	 * FULLY_PROCESSED informs the dce_enqueue_*() functions that this frame
-	 * should be treated as a continuation of previous data
+	 * continuation of the suspended stream. Normally stream continue would
+	 * mean the driver should set initial to false. The issue is that in
+	 * recycle the DCE expects the recycle frame to have the same initial
+	 * bit set as it was sent in the first time. Meaning that if the first
+	 * frame caused a suspend (initial = true) then it should be recycled
+	 * with the initial bit set the same way (initial = true)
 	 */
-	session->state = FULLY_PROCESSED;
+	session->state = session->initial_store ? STREAM_END : FULLY_PROCESSED;
 	ret = pthread_mutex_unlock(&session->lock);
 	assert(!ret);
 	return 0;
@@ -942,7 +965,6 @@ int dce_recycle_fd_pair(struct dce_session *session,
 	dpaa2_sg_set_final((struct dpaa2_sg_entry *)scf_fd, 1);
 	dpaa2_fd_set_addr(scf_fd, (dma_addr_t) &work_unit->scf_result);
 	dpaa2_fd_set_len(scf_fd, sizeof(struct scf_c_cfg));
-	/* Should setup steless headers here */
 
 	/* FD */
 	fd_set_ivp(fd_list, true); /* bpid is invalid */
@@ -959,12 +981,14 @@ int dce_recycle_fd_pair(struct dce_session *session,
 	fd_frc_set_cf(fd_list, session->compression_format);
 	fd_frc_set_sf(fd_list, !!session->paradigm);
 	/* The recycle bit should only be set if the user calls
-	 * stream_continue() or stream_abort(). This gives the caller the
+	 * stream_continue(). This gives the caller the
 	 * responsibility of deciding when to acknowledge that a problem has
 	 * occurred in processing a stream of data and how to react
 	 */
-	fd_frc_set_recycle(fd_list, session->recycle);
-	session->recycle = false;
+	if (session->recycle) {
+		fd_frc_set_recycle(fd_list, session->recycle);
+		session->recycle = false;
+	}
 	if (session->state == STREAM_END) {
 		fd_frc_set_initial(fd_list, true);
 		session->state = FULLY_PROCESSED;
@@ -972,7 +996,15 @@ int dce_recycle_fd_pair(struct dce_session *session,
 	fd_frc_set_z_flush(fd_list, op->flush);
 	if (op->flush == DCE_Z_FINISH)
 		session->state = STREAM_END;
-	fd_frc_set_uspc(fd_list, false);
+	if (session->reset) {
+		/* resetting the session state is done through the stream_abort()
+		 * and TODO session_reset() functions both should set the
+		 * session state to STREAM_END and cause the next frame (the one
+		 * we are setting up here) to have initial set to true */
+		assert(fd_frc_get_initial(fd_list));
+		fd_frc_set_uspc(fd_list, true);
+		session->reset = false;
+	}
 	fd_frc_set_uhc(fd_list, false);
 
 	/* Set caller context */

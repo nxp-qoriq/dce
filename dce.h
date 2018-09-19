@@ -242,6 +242,8 @@ struct dce_session {
 	uint8_t state;
 	bool recycle;
 	bool recycler_allowed;
+	bool initial_store;
+	bool reset;
 	struct dpdcei *dpdcei;
 	struct dce_flow flow;
 	struct circ_fifo fifo;
