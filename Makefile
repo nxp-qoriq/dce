@@ -52,7 +52,7 @@ EXECS = $(BIN)/dce-api-perf-test
 all: $(EXECS)
 
 $(BIN)/%: tests/%.o libdce.a libqbman.a
-	$(CC) $(CFLAGS) $^ -o $@
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 
 libdce.a: $(OBJS)
