@@ -330,6 +330,7 @@ static int dpaa2_dce_pull_dequeue_rx(struct dpdcei *dpdcei)
 				dequeue_count++;
 				atomic_dec(&dpdcei->frames_in_flight);
 				atomic_dec(&flow->frames_in_flight);
+
 				flow->cb(flow, cmd, fd);
 				pull_count = 0;
 			}

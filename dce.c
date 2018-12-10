@@ -135,6 +135,14 @@ static void internal_callback(struct dce_flow *flow, u32 cmd,
 #ifdef DEBUG
 		pr_info("Received callback for DCE process command\n");
 #endif
+		if (dpaa2_fd_get_addr(&work_unit->store.output_fd) ==
+				(dma_addr_t) session->pending_output.vaddr) {
+			/* We trick the DCE into emptying the pending output
+			 * buffer into itself to force exit the flow from
+			 * SUSPEND mode */
+			dma_mem_free(&session->flow.mem, work_unit);
+			return;
+		}
 		assert(!circ_fifo_empty(&session->fifo));
 		work_unit->fd_list = *fd;
 
@@ -310,7 +318,8 @@ int dce_session_create(struct dce_session *session,
 		goto fail_dce_internals;
 
 	/* Setup flow circular fifo */
-	temp = dma_mem_memalign(&session->flow.mem, 64, 320 * 30000);
+	temp = dma_mem_memalign(&session->flow.mem, 64,
+			sizeof(struct work_unit) * 30000);
 	if (!temp) {
 		pr_err("Unable to allocate memory for flow fifo");
 		goto err_setup_circular_fifo;
@@ -571,10 +580,59 @@ int dce_enqueue_fd_pair(struct dce_session *session,
 		 * function when the user calls continue() or abort() followed
 		 * by recycle_fd(). If the application decides to call abort()
 		 * followed by discard() of all frames then this . */
-		fd_frc_set_uspc(fd_list, true);
+		struct work_unit *abort_unit;
+		struct dpaa2_fd *abort_fd;
+		struct circ_fifo *fifo = &session->fifo;
+		/* Enqueue an empty fd with only a recycle bit set to force the
+		 * flow to exit recycle mode. This allows the next FD with uspc
+		 * set to clear the history and successfully restart the flow */
+		abort_unit = dma_mem_memalign(&session->flow.mem, 0,
+				sizeof(*abort_unit));
+
+		assert(((uint8_t *) abort_unit < (uint8_t *)fifo->mem) ||
+			((uint8_t *)abort_unit > ((uint8_t *)fifo->mem + fifo->num_bufs * fifo->buf_size - 1)));
+		if (!abort_unit) {
+			ret = -ENOSPC;
+			goto abort_stream_mem_fail;
+		}
+		memset(abort_unit, 0, sizeof(*abort_unit));
+
+		dpaa2_fd_set_format(&abort_unit->store.input_fd, dpaa2_fd_null);
+		dpaa2_fd_set_len(&abort_unit->store.input_fd, 0);
+		dpaa2_fd_set_addr(&abort_unit->store.input_fd,
+							(dma_addr_t)NULL);
+		dpaa2_fd_set_frc(&abort_unit->store.input_fd, 0xABCDEF22);
+
+		dpaa2_fd_set_len(&abort_unit->store.output_fd,
+				session->pending_output.len);
+		dpaa2_fd_set_addr(&abort_unit->store.output_fd,
+				(dma_addr_t)session->pending_output.vaddr);
+
+		dpaa2_sg_set_final(
+			(struct dpaa2_sg_entry *)&abort_unit->store.scf_fd, 1);
+		dpaa2_fd_set_addr(&abort_unit->store.scf_fd,
+				(dma_addr_t) &abort_unit->scf_result);
+		dpaa2_fd_set_len(&abort_unit->store.scf_fd,
+				sizeof(struct scf_c_cfg));
+
+		abort_fd = &abort_unit->fd_list;
+		dpaa2_fd_set_format(abort_fd, dpaa2_fd_list);
+		dpaa2_fd_set_len(abort_fd, 0);
+		dpaa2_fd_set_addr(abort_fd,
+				(dma_addr_t)abort_unit->store.fd_list_store);
+
+		fd_frc_set_recycle(abort_fd, true);
+		fd_frc_set_sf(abort_fd, true);
+
+		enqueue_fd(flow, abort_fd);
+
+		/* resetting the session state is done through the stream_abort()
+		 * and TODO session_reset() functions both should set the
+		 * session state to STREAM_END and cause the next frame (the one
+		 * we are setting up here) to have initial set to true */
+		assert(fd_frc_get_initial(fd_list));
 		session->reset = false;
 	}
-
 
 	/* Set caller context */
 	work_unit->store.context = op->user_context;
@@ -613,11 +671,12 @@ int dce_enqueue_fd_pair(struct dce_session *session,
 
 	return 0;
 
+abort_stream_mem_fail:
 fail_enqueue:
 	/* Cannot use circ_fifo_free() because that would change the head index
 	 * of the fifo, but we want to return a buffer at the tail index
 	 */
-	 work_unit->state = FREE;
+	work_unit->state = FREE;
 	circ_fifo_alloc_undo(&session->fifo);
 err_no_space:
 	if (session->paradigm == DCE_STATEFUL_RECYCLE)
@@ -660,6 +719,37 @@ int dce_dequeue_fd_pair(struct dce_session *session,
 		i < num_ops && work_unit->state == DONE;
 		i++, work_unit = circ_fifo_head(&session->fifo)) {
 
+		/* Ensure that a SUSPEND is never returned mid array. We promise
+		 * to only return a SUSPEND FD for i = 0. This makes application
+		 * side software much simpler, as a SUSPEND FD locks the enqueue
+		 * and recycle functions until a stream_continue() call is made.
+		 * This means that a caller may get 16 FDs. The first 15 are
+		 * skipped but the last one is SUSPEND. An application that
+		 * employs a simple loop will attempt to send the SKIPPED frames
+		 * back for processing will be rejected, and then must employ
+		 * advanced algorithms that run through the entire returned
+		 * array first to make sure there is no SUSPEND and then to
+		 * resend the SKIPPED frames. If it finds a SUSPEND it would
+		 * have to first recycle the SUSPEND then reset the loop to the
+		 * first SKIPPED frame and continue work. By promising the
+		 * Caller to never deliver a SUSPEND mid array and only allow it
+		 * on the very first container in the array we take the burden
+		 * off of the application to create this complex logic */
+		if (i > 0) {
+			switch (fd_frc_get_status(&work_unit->fd_list)) {
+			case OUTPUT_BLOCKED_SUSPEND:
+			case MEMBER_END_SUSPEND:
+			case ACQUIRE_DATA_BUFFER_DENIED_SUSPEND:
+			case ACQUIRE_TABLE_BUFFER_DENIED_SUSPEND:
+			case Z_BLOCK_SUSPEND:
+			case OLL_REACHED_SUSPEND:
+				goto quick_exit;
+				break;
+			default:
+				break;
+			}
+		}
+
 #ifdef DEBUG
 		if (prev_work != NULL && prev_work != work_unit - 1 &&
 				work_unit != session->fifo.mem)	{
@@ -669,7 +759,6 @@ int dce_dequeue_fd_pair(struct dce_session *session,
 		}
 		prev_work = work_unit;
 #endif
-
 		dpaa2_fd_set_frc(&work_unit->store.output_fd, 0x0);
 		work_unit->state = FREE;
 		/* We should be checking at > 1, but there is a small chance
@@ -785,6 +874,8 @@ int dce_dequeue_fd_pair(struct dce_session *session,
 		}
 #endif
 	}
+
+quick_exit:
 	if (session->paradigm == DCE_STATEFUL_RECYCLE) {
 		ret = pthread_mutex_unlock(&session->lock);
 		/* No unlock inside assert in case assert is compiled out */
@@ -873,16 +964,16 @@ EXPORT_SYMBOL(dce_stream_continue);
 
 int dce_recycle_discard(struct dce_session *session)
 {
-	int ret;
+	int ret = 0, err;
 
-	ret = pthread_mutex_lock(&session->lock);
-	assert(!ret);
+	err = pthread_mutex_lock(&session->lock);
+	assert(!err);
 	if (!session->recycler_allowed) {
 		/* Recycle is only allowed if a suspend frame was received and
 		 * one of stream_continue() and stream_abort() is called
 		 */
-		ret = pthread_mutex_unlock(&session->lock);
-		assert(!ret);
+		err = pthread_mutex_unlock(&session->lock);
+		assert(!err);
 		return -EACCES;
 	}
 	assert(session->recycle_todo > 0);
@@ -891,9 +982,9 @@ int dce_recycle_discard(struct dce_session *session)
 		sem_post(&session->enqueue_sem);
 		ret = 1; /* Indicate that the session has exited recycle mode */
 	}
-	ret = pthread_mutex_unlock(&session->lock);
-	assert(!ret);
-	return 0;
+	err = pthread_mutex_unlock(&session->lock);
+	assert(!err);
+	return ret;
 }
 EXPORT_SYMBOL(dce_recycle_discard);
 
@@ -997,14 +1088,60 @@ int dce_recycle_fd_pair(struct dce_session *session,
 	if (op->flush == DCE_Z_FINISH)
 		session->state = STREAM_END;
 	if (session->reset) {
+		struct work_unit *abort_unit;
+		struct dpaa2_fd *abort_fd;
+		struct circ_fifo *fifo = &session->fifo;
+		/* Enqueue an empty fd with only a recycle bit set to force the
+		 * flow to exit recycle mode. This allows the next FD with uspc
+		 * set to clear the history and successfully restart the flow */
+		abort_unit = dma_mem_memalign(&session->flow.mem, 0,
+				sizeof(*abort_unit));
+
+		assert(((uint8_t *) abort_unit < (uint8_t *)fifo->mem) ||
+			((uint8_t *)abort_unit > ((uint8_t *)fifo->mem + fifo->num_bufs * fifo->buf_size - 1)));
+		if (!abort_unit) {
+			ret = -ENOSPC;
+			goto abort_stream_mem_fail;
+		}
+		memset(abort_unit, 0, sizeof(*abort_unit));
+
+		dpaa2_fd_set_format(&abort_unit->store.input_fd, dpaa2_fd_null);
+		dpaa2_fd_set_len(&abort_unit->store.input_fd, 0);
+		dpaa2_fd_set_addr(&abort_unit->store.input_fd,
+							(dma_addr_t)NULL);
+		dpaa2_fd_set_frc(&abort_unit->store.input_fd, 0xABCDEF22);
+
+		dpaa2_fd_set_len(&abort_unit->store.output_fd,
+				session->pending_output.len);
+		dpaa2_fd_set_addr(&abort_unit->store.output_fd,
+				(dma_addr_t)session->pending_output.vaddr);
+
+		dpaa2_sg_set_final(
+			(struct dpaa2_sg_entry *)&abort_unit->store.scf_fd, 1);
+		dpaa2_fd_set_addr(&abort_unit->store.scf_fd,
+				(dma_addr_t) &abort_unit->scf_result);
+		dpaa2_fd_set_len(&abort_unit->store.scf_fd,
+				sizeof(struct scf_c_cfg));
+
+		abort_fd = &abort_unit->fd_list;
+		dpaa2_fd_set_format(abort_fd, dpaa2_fd_list);
+		dpaa2_fd_set_len(abort_fd, 0);
+		dpaa2_fd_set_addr(abort_fd,
+				(dma_addr_t)abort_unit->store.fd_list_store);
+
+		fd_frc_set_recycle(abort_fd, true);
+		fd_frc_set_sf(abort_fd, true);
+
+		enqueue_fd(flow, abort_fd);
+
 		/* resetting the session state is done through the stream_abort()
 		 * and TODO session_reset() functions both should set the
 		 * session state to STREAM_END and cause the next frame (the one
 		 * we are setting up here) to have initial set to true */
 		assert(fd_frc_get_initial(fd_list));
-		fd_frc_set_uspc(fd_list, true);
 		session->reset = false;
 	}
+	fd_frc_set_uspc(fd_list, false);
 	fd_frc_set_uhc(fd_list, false);
 
 	/* Set caller context */
@@ -1045,6 +1182,7 @@ int dce_recycle_fd_pair(struct dce_session *session,
 	pthread_mutex_unlock(&session->lock);
 	return ret;
 
+abort_stream_mem_fail:
 fail_enqueue:
 	/* Cannot use circ_fifo_free() because that would change the head index
 	 * of the fifo, but we want to return a buffer at the tail index

@@ -14,13 +14,20 @@
 
 struct chunk {
 	dma_addr_t addr;
+	dma_addr_t out_addr;
 	size_t size;
+	size_t out_size;
 	struct list_head node;
 };
 
 enum suspend_policy {
 	CONTINUE = 0,
 	ABORT = 1,
+};
+
+enum skip_policy {
+	RECYCLE = 0,
+	DISCARD = 1,
 };
 
 struct work_context {
@@ -40,8 +47,9 @@ struct work_context {
 	uint64_t end_time;
 	bool synchronous;
 	enum suspend_policy stream_suspend_policy;
+	enum skip_policy skipped_frames_policy;
 	unsigned int recycle_interval;
-	bool recycle_sleep;
+	bool suspend_sleep;
 	sem_t sync_sem;
 	sem_t recycle_finished;
 	int engine;
@@ -186,7 +194,7 @@ static void *worker_dq(void *__context)
 			struct dce_op_fd_pair_rx *op = &ops[i];
 			int ret;
 
-			debug(5, "frame dq %u has status 0x%x, %s, input was %u bytes, of which %zu bytes were consumed, %u bytes of output\n",
+			debug(5, "frame dq %u has status 0x%x, %s, input was %u bytes, of which %zu bytes were consumed, output buffer is %u\n",
 					atomic_read(&context->dq), op->status,
 					dce_status_string(op->status),
 					dpaa2_fd_get_len(&op->input_fd),
@@ -288,9 +296,24 @@ static void *worker_dq(void *__context)
 				 * are very lucky and it so happens that the
 				 * processing of the data stopped right on the
 				 * boundary between streams */
-				context->stream_suspend_policy == CONTINUE ?
-					dce_stream_continue(context->session) :
+				if (context->stream_suspend_policy == CONTINUE)
+					dce_stream_continue(context->session);
+				else
 					dce_stream_abort(context->session);
+
+				if (context->skipped_frames_policy == DISCARD) {
+					ret = dce_recycle_discard(context->session);
+					debug(5, "Discard frame %u. Will not attempt to reprocess\n",
+						atomic_read(&context->dq));
+					if (ret == 1)
+						debug(0, "Exited suspend by discard at frame %u\n",
+						     atomic_read(&context->eq));
+					if (ret == 1 && context->suspend_sleep)
+						/* session is out of suspend */
+						wake_up(
+						   &context->recycle_finished);
+					break;
+				}
 
 				recycle_op.input_fd = &op->input_fd;
 				recycle_op.output_fd = &op->output_fd;
@@ -309,7 +332,6 @@ static void *worker_dq(void *__context)
 					dpaa2_fd_get_len(&op->input_fd)
 					- op->input_consumed);
 
-
 				/* Update the output length to accommodate the
 				 * extra data that did not fit. Note that
 				 * This suspend was triggered intentionally by
@@ -324,7 +346,7 @@ static void *worker_dq(void *__context)
 				dpaa2_fd_set_len(recycle_op.output_fd,
 					(100 + dpaa2_fd_get_len(&op->output_fd))
 					* 30 * max_decomp_ratio);
-				assert(dpaa2_fd_get_len(&op->output_fd));
+				assert(dpaa2_fd_get_len(recycle_op.output_fd));
 
 				/* Ensure the context->eq is reread from mem */
 				asm volatile("dmb st" : : : "memory");
@@ -350,15 +372,29 @@ static void *worker_dq(void *__context)
 					dpaa2_fd_get_len(recycle_op.input_fd),
 					dpaa2_fd_get_len(recycle_op.output_fd));
 				if (ret == 1)
-					debug(0, "Exited recycle at frame %u\n",
+					debug(0, "Exited suspend by recycle at frame %u\n",
 						atomic_read(&context->eq));
-				if (ret == 1 && context->recycle_sleep)
+				if (ret == 1 && context->suspend_sleep)
 					/* The session is out of suspend */
 					wake_up(&context->recycle_finished);
 				break;
 			case SKIPPED:
 				debug(1, "frame %u returned as is because the session is suspended\n",
 						atomic_read(&context->dq));
+
+				if (context->skipped_frames_policy == DISCARD) {
+					ret = dce_recycle_discard(context->session);
+					debug(5, "Discard frame %u. Will not attempt to reprocess\n",
+						atomic_read(&context->dq));
+					if (ret == 1)
+						debug(0, "Exited suspend by discard at frame %u\n",
+						     atomic_read(&context->eq));
+					if (ret == 1 && context->suspend_sleep)
+						/* session is out of suspend */
+						wake_up(
+						   &context->recycle_finished);
+					break;
+				}
 
 				recycle_op.input_fd = &op->input_fd;
 				recycle_op.output_fd = &op->output_fd;
@@ -389,7 +425,7 @@ static void *worker_dq(void *__context)
 				 * not trigger a double within the pull window
 				 * of 16 fds */
 				assert(ret >= 0);
-				debug(5, "frame %u flush %s, input %u bytes, output %u bytes\n",
+				debug(5, "frame %u flush %s, input %u bytes, output buffer %u bytes\n",
 					atomic_read(&context->eq),
 					recycle_op.flush == DCE_Z_FINISH ? "Z_FINISH" :
 					recycle_op.flush == DCE_Z_NO_FLUSH ? "Z_NO_FLUSH" :
@@ -399,13 +435,13 @@ static void *worker_dq(void *__context)
 				if (ret == 1)
 					debug(0, "Exited recycle at frame %u\n",
 						atomic_read(&context->eq));
-				if (ret == 1 && context->recycle_sleep) {
+				if (ret == 1 && context->suspend_sleep) {
 					/* The session is out of suspend */
 					wake_up(&context->recycle_finished);
 				}
 				break;
 			default:
-				if (context->recycle_sleep)
+				if (context->suspend_sleep)
 					/* should not be here unless in async */
 					sem_post(&context->recycle_finished);
 				else if (context->synchronous)
@@ -501,8 +537,21 @@ static void *worker_func(void *__context)
 	int i;
 	cpu_set_t cpu;
 	CPU_ZERO(&cpu);
-	for (i = 0; i < get_nprocs(); i++)
-		CPU_SET(i, &cpu);
+	/*for (i = 0; i < get_nprocs(); i++)
+		CPU_SET(i, &cpu);*/
+	pthread_getaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpu);
+	for (i = 0; i < get_nprocs(); i++) {
+		if (CPU_ISSET(i, &cpu)) {
+			CPU_ZERO(&cpu);
+			if (i % 2)
+				CPU_SET(i - 1, &cpu);
+			else
+				CPU_SET(i + 1, &cpu);
+			break;
+		}
+		assert(false); /* Should not reach here */
+	}
+
 	pthread_attr_init(&thread_attr);
 	/* We inherit the enqueuer affinity by default in phtread_create() the
 	 * work done below removes the affinity mask of the enqueuer thread to
@@ -530,13 +579,14 @@ static void *worker_func(void *__context)
 		}
 		else
 			op.output_fd = &output_fd;
+		dpaa2_fd_set_addr(&output_fd, chunk->out_addr);
+		dpaa2_fd_set_len(&output_fd, chunk->out_size);
 		op.flush  = last_chunk ? DCE_Z_FINISH : DCE_Z_NO_FLUSH;
 		op.user_context = context;
 
 		if (context->synchronous)
 			/* Send one frame at a time in synchronous mode. the
-			 * dequeuer frees it
-			 */
+			 * dequeuer frees it */
 			sem_wait(&context->sync_sem);
 
 		/* The input_fd frc is not used by DCE, We set it here as a
@@ -563,10 +613,22 @@ static void *worker_func(void *__context)
 			 * dequeue loop to resolve the issue and signal us to
 			 * continue work
 			 */
-			context->recycle_sleep = true;
+			context->suspend_sleep = true;
 			sem_wait(&context->recycle_finished);
-			context->recycle_sleep = false;
+			context->suspend_sleep = false;
 			debug(1, "Enqueuer waking up because dequeuer signaled us that recycle is done\n");
+			if (context->skipped_frames_policy == DISCARD &&
+				context->engine == DPDCEI_ENGINE_DECOMPRESSION)
+				/* Reset the chunk pointer to the first chunk of
+				 * the file for decompression if the user picked
+				 * discard mode. This is necessary in
+				 * decompression, because decompression relies
+				 * on previous context to continue decompression
+				 * and it will almost always fail if a portion
+				 * of a stream is discarded before continuing
+				 * processing afterwards */
+				chunk = list_entry(context->chunk_list->next,
+					typeof(*chunk), node);
 			continue;
 		} else if (ret) {
 			pr_err("Error on enqueue %d\n", ret);
@@ -575,7 +637,7 @@ static void *worker_func(void *__context)
 		}
 		atomic_inc(&context->eq);
 
-		debug(5, "frame %u has initial %s, flush %s, input %u bytes, output %u bytes\n",
+		debug(5, "frame %u has initial %s, flush %s, input %u bytes, output buffer %u bytes\n",
 			atomic_read(&context->eq),
 			chunk->node.prev == context->chunk_list ?
 				"true" : "false",
@@ -672,6 +734,7 @@ static const char STR_decomp_ratio[] = "--decomp-ratio=";
 static const char STR_recycle[] = "--recycle=";
 static const char STR_sync[] = "--synchronous";
 static const char STR_suspend_policy[] = "--suspend-policy=";
+static const char STR_skip_policy[] = "--skip-policy=";
 static const char STR_debug[] = "-d";
 
 static const char STR_usage[] =
@@ -692,7 +755,12 @@ static const char STR_usage[] =
 "                                Continue or abort streams when suspended. Only valid if paradigm=stateful-recycle\n"
 "                                `continue' logical stream i.e. file\n"
 "                                `abort' discard stream history and treat next data as a new stream\n"
-"                                Note: Stream history is needed for decompression in most cases\n"
+"                                NOTE: Stream history is needed for decompression in most cases\n"
+"    --skip-policy=<policy>  recycle, discard\n"
+"                            `recycle' or `discard' work that was previously skipped due to a suspend. Only valid if paradigm=stateful-recycle\n"
+"                            NOTE: discard should be used when suspend-policy is abort and the test is doing decompression.\n"
+"                            Otherwise application will attempt to start decompression in the middle of a file. Likely result in a header error\n"
+"                            NOTE: Data integrity is maintained only when suspend-policy=continue and skip-policy=continue\n"
 "    --decomp-ratio=<inflate-ratio> Output buffers will be <inflate-ratio> times the input buffer size\n"
 "				    Use This option if `The output buffer supplied was too small' error report is observed\n"
 "    -d [debug_level] debug prints based on level where -d 1 is the lowest\n"
@@ -711,6 +779,7 @@ int main(int argc, char *argv[])
 	const char *out_file_name = NULL;
 	bool synchronous_mode = false; /* asynchronous by default */
 	enum suspend_policy suspend_policy = CONTINUE; /* Continue by default */
+	enum skip_policy skip_policy = RECYCLE; /* recycle by default */
 	unsigned int recycle_interval = 0; /* No recycle by default */
 	size_t file_size;
 	unsigned int num_chunks = 0;
@@ -783,7 +852,6 @@ int main(int argc, char *argv[])
 						STR_chunk_size);
 		} else if (!strncmp(*argv, STR_recycle,
 					strlen(STR_recycle))) {
-			/*exit(EXIT_FAILURE);*/
 			recycle_interval = get_ularg(&(*argv)[strlen(STR_recycle)],
 						STR_recycle);
 			pr_info("********RECYCLE MODE ENABLED********\n"
@@ -905,15 +973,32 @@ int main(int argc, char *argv[])
 			synchronous_mode = true;
 		} else if (!strncmp(*argv, STR_suspend_policy, strlen(STR_suspend_policy))) {
 			if (!strncmp(&(*argv)[strlen(STR_suspend_policy)], "continue",
-						strlen("continue")))
+						strlen("continue"))) {
 				suspend_policy = CONTINUE;
-			else if (!strncmp(&(*argv)[strlen(STR_suspend_policy)], "abort",
-						strlen("abort")))
+			} else if (!strncmp(&(*argv)[strlen(STR_suspend_policy)], "abort",
+						strlen("abort"))) {
 				suspend_policy = ABORT;
-			else {
-				pr_err("Unexpected paradigm parameter\n");
+				pr_info("********ABORT MODE ENABLED********\n"
+					"Test will abort mid stream if a suspend occurs. Data produced will not be decompressable\n"
+					"Decompressed data will not correspond to the original input\n");
+			} else {
+				pr_err("Unexpected suspend policy parameter\n");
 				exit(EXIT_FAILURE);
 			}
+		} else if (!strncmp(*argv, STR_skip_policy, strlen(STR_skip_policy))) {
+			if (!strncmp(&(*argv)[strlen(STR_skip_policy)], "recycle",
+						strlen("recycle"))) {
+				skip_policy = RECYCLE;
+			} else if (!strncmp(&(*argv)[strlen(STR_skip_policy)], "discard",
+						strlen("discard"))) {
+				pr_info("********DISCARD MODE ENABLED********\n"
+					"ALL skipped frames will be discarded instead of resent back for processing\n");
+				skip_policy = DISCARD;
+			} else {
+				pr_err("Unexpected skip policy parameter\n");
+				exit(EXIT_FAILURE);
+			}
+
 		} else {
 			pr_err("Unrecognised argument '%s'\n"
 				"use --help to see usage \n", *argv);
@@ -931,10 +1016,18 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	if (out_file_name && !synchronous_mode) {
+	/*if (out_file_name && !synchronous_mode) {
 		pr_err("--out=<path> must be used with --synchronous\n");
 		exit(EXIT_FAILURE);
+	}*/
+	if (suspend_policy == ABORT && paradigm == DCE_STATELESS) {
+		pr_err("suspend-policy=abort must be used with --paradigm=stateful-recycle\n");
+		exit(EXIT_FAILURE);
 	}
+	if (suspend_policy == ABORT && skip_policy == RECYCLE)
+		pr_info("NOTE: suspend policy is set to abort and skip policy is set to recycle\n"
+			"This combination will resend skipped frames to DCE *AFTER* destroying all previous context\n"
+			"This will almost always fail in decompression, because decompression depends on previous output\n");
 
 	/* Setup MC resources */
 	mc_io = malloc(sizeof(struct fsl_mc_io));
@@ -999,6 +1092,7 @@ int main(int argc, char *argv[])
 
 		while ((bytes_in = fread(buf, 1, chunk_size, input_file)) > 0) {
 			struct chunk *new_chunk = malloc(sizeof(struct chunk));
+			const size_t out_size = 15 + chunk_size;
 
 			new_chunk->addr =
 			   (dma_addr_t) dma_mem_memalign(&dce_mem, 0, bytes_in);
@@ -1006,6 +1100,13 @@ int main(int argc, char *argv[])
 				pr_err("Unable to allocate dma memory for DCE\n");
 				exit(EXIT_FAILURE);
 			}
+			new_chunk->out_addr =
+				(dma_addr_t) dma_mem_memalign(&dce_mem, 0, out_size);
+			if (!new_chunk->out_addr) {
+				pr_err("Unable to allocate dma memory for DCE\n");
+				exit(EXIT_FAILURE);
+			}
+			new_chunk->out_size = out_size;
 			memcpy((void *)new_chunk->addr, buf, bytes_in);
 			new_chunk->size = bytes_in;
 			list_add_tail(&new_chunk->node, &chunk_list);
@@ -1110,6 +1211,7 @@ int main(int argc, char *argv[])
 				context->idx = i;
 				context->synchronous = synchronous_mode;
 				context->stream_suspend_policy = suspend_policy;
+				context->skipped_frames_policy = skip_policy;
 				context->recycle_interval = i ? 0 : recycle_interval;
 				context->session =
 					malloc(sizeof(*context->session));
