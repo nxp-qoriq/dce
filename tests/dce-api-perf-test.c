@@ -10,6 +10,9 @@
 #include <vfio_utils.h>
 #include "../dce.h"
 #include "dce-test-data.h"
+#include <fsl_dpdcei.h>
+#include <allocator.h>
+#include "qbman_helper.h"
 #include "private.h"
 
 struct chunk {
@@ -31,8 +34,10 @@ enum skip_policy {
 };
 
 struct work_context {
+	struct qbman_swp *swp;
 	pthread_t pid;
-	struct dce_session *session;
+	struct dpdcei_lane *lane;
+	struct dpdcei *dpdcei;
 	struct list_head *chunk_list;
 	const char *out_file;
 	atomic_t eq;
@@ -40,7 +45,7 @@ struct work_context {
 	size_t total_in;
 	size_t total_out;
 	struct dma_mem *mem;
-	enum dce_compression_format comp_format;
+	enum lane_compression_format comp_format;
 	enum dce_status status;
 	bool stop;
 	bool dequeue_stop;
@@ -67,8 +72,8 @@ struct dpdcei_context {
 	struct list_head node;
 };
 
-struct dpio_context {
-	struct dpaa2_io *dpio;
+struct swp_context {
+	struct qbman_swp *swp;
 	int id;
 	uint16_t token;
 	/* Keep track of dpdcei objects belonging to this dpio */
@@ -79,7 +84,7 @@ struct dpio_context {
 struct dprc_context {
 	int id;
 	/* Keep track of dpio objects belonging to this dprc */
-	struct list_head dpio_list;
+	struct list_head swp_list;
 	struct list_head node;
 };
 
@@ -113,19 +118,11 @@ static void sync_all(void);
 
 #define wake_up(x) sem_post(x)
 
-static void wake_cb(void *__context)
-{
-	sem_t *wake_up_handle = __context;
-
-	debug(6, "Got callback successfully\n");
-	wake_up(wake_up_handle);
-}
-
 static void *worker_dq(void *__context)
 {
 	struct work_context *context = __context;
 	FILE *out_stream = NULL;
-	int num_ops, empty_count = 0, i;
+	unsigned int num_ops, empty_count = 0, i;
 	char thread_name[16];
 	sem_t work_done_sem;
 
@@ -149,41 +146,32 @@ static void *worker_dq(void *__context)
 	debug(1, "Running on core %d\n", sched_getcpu());
 
 	while (!context->dequeue_stop || (atomic_read(&context->eq) > atomic_read(&context->dq))) {
-		struct timespec time;
-		uint32_t frame_count_tx, frame_count_rx, byte_count;
-		struct dce_op_fd_pair_rx ops[16];
+		const unsigned int max_num_fds = 16;
+		struct dce_op_fd_pair_rx ops[max_num_fds];
 
-		num_ops = dce_dequeue_fd_pair(context->session, ops, 16);
+		num_ops = lane_dequeue_fd_pair(context->swp, context->lane, ops,
+								max_num_fds);
 		if (!num_ops) {
+			const unsigned int timeout = 15000;
+			const unsigned int usec_in_sec = 1000000;
+			const unsigned int backoff = 1000; /* microseconds */
+
 			empty_count++;
-			if (empty_count > 2) {
-				dce_session_notification_arm(context->session,
-						&work_done_sem);
-				if (clock_gettime(CLOCK_REALTIME, &time) == -1)
-					exit(EXIT_FAILURE);
-				time.tv_sec += 15; /* Wait up to 1 second */
-				debug(3, "Dequeuer going to sleep for 1 sec max waiting for frames\n");
-				if (sem_timedwait(&work_done_sem, &time)) {
-					assert(errno == ETIMEDOUT);
-					if (atomic_read(&context->eq) - atomic_read(&context->dq)) {
-						debug(0, "ERROR: Timed out while waiting for %d dequeues\n",
-						     atomic_read(&context->eq) - atomic_read(&context->dq));
-						dpaa2_io_query_fq_count(context->session->flow.dpdcei->dpio_p,
-								context->session->flow.dpdcei->tx_fqid,
-								&frame_count_tx, &byte_count);
-						dpaa2_io_query_fq_count(context->session->flow.dpdcei->dpio_p,
-								context->session->flow.dpdcei->rx_fqid,
-								&frame_count_rx, &byte_count);
-						debug(0, "The number of frames on the Tx frame queue is %"PRIu32" and the Rx frame queue is %"PRIu32"\n",
-						     frame_count_tx, frame_count_rx);
-						debug(0, "PAUSED FOR DEBUG\n");
-						getchar();
-						context->stop = true;
-						pthread_exit(NULL);
-					}
-				}
-				if (errno != ETIMEDOUT)
-					debug(3, "Received signal that frames are available, will go check now\n");
+			usleep(backoff);
+			if (empty_count > (timeout * usec_in_sec / backoff)) {
+				debug(0, "ERROR: Timed out while waiting for %d dequeues\n",
+					atomic_read(&context->eq)
+					- atomic_read(&context->dq));
+				debug(0, "The number of frames on the Tx frame queue is %d and the Rx frame queue is %d\n",
+				   dpdcei_todo_queue_count(context->swp,
+					   context->dpdcei),
+				   dpdcei_done_queue_count(context->swp,
+					   context->dpdcei));
+				debug(0, "PAUSED FOR DEBUG\n");
+				getchar();
+				context->stop = true;
+				pthread_exit(NULL);
+			} else {
 				continue;
 			}
 		} else {
@@ -297,19 +285,19 @@ static void *worker_dq(void *__context)
 				 * processing of the data stopped right on the
 				 * boundary between streams */
 				if (context->stream_suspend_policy == CONTINUE)
-					dce_stream_continue(context->session);
+					lane_stream_continue(context->lane);
 				else
-					dce_stream_abort(context->session);
+					lane_stream_abort(context->lane);
 
 				if (context->skipped_frames_policy == DISCARD) {
-					ret = dce_recycle_discard(context->session);
+					ret = lane_recycle_discard(context->lane);
 					debug(5, "Discard frame %u. Will not attempt to reprocess\n",
 						atomic_read(&context->dq));
 					if (ret == 1)
 						debug(0, "Exited suspend by discard at frame %u\n",
 						     atomic_read(&context->eq));
 					if (ret == 1 && context->suspend_sleep)
-						/* session is out of suspend */
+						/* lane is out of suspend */
 						wake_up(
 						   &context->recycle_finished);
 					break;
@@ -357,8 +345,8 @@ static void *worker_dq(void *__context)
 				dpaa2_fd_set_frc(recycle_op.input_fd,
 						atomic_read(&context->eq));
 
-				while ((ret = dce_recycle_fd_pair(
-					context->session, &recycle_op))) {
+				while ((ret = lane_recycle_fd_pair(context->swp,
+					context->lane, &recycle_op))) {
 					if (ret != -EBUSY)
 						break;
 				}
@@ -375,22 +363,22 @@ static void *worker_dq(void *__context)
 					debug(0, "Exited suspend by recycle at frame %u\n",
 						atomic_read(&context->eq));
 				if (ret == 1 && context->suspend_sleep)
-					/* The session is out of suspend */
+					/* The lane is out of suspend */
 					wake_up(&context->recycle_finished);
 				break;
 			case SKIPPED:
-				debug(1, "frame %u returned as is because the session is suspended\n",
+				debug(1, "frame %u returned as is because the lane is suspended\n",
 						atomic_read(&context->dq));
 
 				if (context->skipped_frames_policy == DISCARD) {
-					ret = dce_recycle_discard(context->session);
+					ret = lane_recycle_discard(context->lane);
 					debug(5, "Discard frame %u. Will not attempt to reprocess\n",
 						atomic_read(&context->dq));
 					if (ret == 1)
 						debug(0, "Exited suspend by discard at frame %u\n",
 						     atomic_read(&context->eq));
 					if (ret == 1 && context->suspend_sleep)
-						/* session is out of suspend */
+						/* lane is out of suspend */
 						wake_up(
 						   &context->recycle_finished);
 					break;
@@ -410,8 +398,8 @@ static void *worker_dq(void *__context)
 				dpaa2_fd_set_frc(recycle_op.input_fd,
 						atomic_read(&context->eq));
 
-				while ((ret = dce_recycle_fd_pair(
-					context->session, &recycle_op))) {
+				while ((ret = lane_recycle_fd_pair(context->swp,
+					context->lane, &recycle_op))) {
 					if (ret != -EBUSY)
 						break;
 				}
@@ -436,7 +424,7 @@ static void *worker_dq(void *__context)
 					debug(0, "Exited recycle at frame %u\n",
 						atomic_read(&context->eq));
 				if (ret == 1 && context->suspend_sleep) {
-					/* The session is out of suspend */
+					/* The lane is out of suspend */
 					wake_up(&context->recycle_finished);
 				}
 				break;
@@ -481,7 +469,7 @@ static void *worker_func(void *__context)
 	struct dpaa2_fd too_small_output_fd = empty_fd;
 	struct chunk *chunk;
 	int ret;
-	uint32_t frame_count = 0, byte_count = 0, tx_max = 0,
+	uint32_t frame_count = 0, tx_max = 0,
 		 rx_max = 0, tx_min = UINT32_MAX, rx_min = UINT32_MAX, tx_avg = 0,
 		 rx_avg = 0, reads = 0;
 
@@ -591,23 +579,22 @@ static void *worker_func(void *__context)
 
 		/* The input_fd frc is not used by DCE, We set it here as a
 		 * token and read it on the other side to ensure order. This set
-		 * is done HERE and not before the sem_wait because the session
+		 * is done HERE and not before the sem_wait because the lane
 		 * may go into recycle. In which case the context->eq will be
 		 * incremented by the dequeuer while recycling rejected frames.
 		 * This race only occurs in synchronous mode, since in async
 		 * mode the enqueuer goes to sleep waiting on the recycle
-		 * semaphore and the loop logic rereads the context->eq
-		 */
+		 * semaphore and the loop logic rereads the context->eq */
 		dpaa2_fd_set_frc(&input_fd, atomic_read(&context->eq));
 
-		ret = dce_enqueue_fd_pair(context->session, &op);
+		ret = lane_enqueue_fd_pair(context->swp, context->lane, &op);
 		if (ret == -EBUSY) {
 			printf("WE ARE GETTING EBUSY!!!\n");
 			msleep(1); /* Give DCE a breather */
 			continue;
 		} else if (ret == -EACCES) {
-			debug(1, "Enqueuer sees that session is in suspend. Sleeping until the session is recovered\n");
-			/* -EACCES means that the session has entered recycle
+			debug(1, "Enqueuer sees that lane is in suspend. Sleeping until the lane is recovered\n");
+			/* -EACCES means that the lane has entered recycle
 			 * state. This usually happens if the output buffer was
 			 * insufficient to hold all output. We will wait for the
 			 * dequeue loop to resolve the issue and signal us to
@@ -653,17 +640,20 @@ static void *worker_func(void *__context)
 			do  {
 				if (!sampled) {
 					sampled = true;
-					dpaa2_io_query_fq_count(context->session->flow.dpdcei->dpio_p,
-							context->session->flow.dpdcei->tx_fqid,
-							&frame_count, &byte_count);
+					frame_count = dpdcei_todo_queue_count(
+							context->swp,
+							context->dpdcei);
+
 					if (tx_max < frame_count)
 						tx_max = frame_count;
 					if (tx_min > frame_count)
 						tx_min = frame_count;
-					tx_avg = ((reads * tx_avg) + frame_count) / (reads + 1);
-					dpaa2_io_query_fq_count(context->session->flow.dpdcei->dpio_p,
-							context->session->flow.dpdcei->rx_fqid,
-							&frame_count, &byte_count);
+					tx_avg = ((reads * tx_avg)
+							+ frame_count) /
+							(reads + 1);
+					frame_count = dpdcei_done_queue_count(
+							context->swp,
+							context->dpdcei);
 					if (rx_max < frame_count)
 						rx_max = frame_count;
 					if (rx_min > frame_count)
@@ -678,7 +668,6 @@ static void *worker_func(void *__context)
 		}
 
 		if (context->stop) {
-			extern int interrupt_count;
 
 			context->dequeue_stop = true;
 			debug(0, "Done work. Waiting for %d outstanding work requests before exit\n",
@@ -686,9 +675,9 @@ static void *worker_func(void *__context)
 			pthread_join(dequeuer, NULL /* no need retval */);
 			assert(atomic_read(&context->eq) == atomic_read(&context->dq));
 			context->end_time = read_cntvct();
-			debug(0, "tx_max = %u rx_max = %u tx_min = %u rx_min = %u tx_avg = %u rx_avg = %u enqueuer got ahead %u times. Interrupt count = %d\n",
+			debug(0, "tx_max = %u rx_max = %u tx_min = %u rx_min = %u tx_avg = %u rx_avg = %u enqueuer got ahead %u times.\n",
 					tx_max, rx_max, tx_min, rx_min, tx_avg,
-					rx_avg, reads, interrupt_count);
+					rx_avg, reads);
 			if (context->status == OUTPUT_BLOCKED_DISCARD) {
 				debug(0, "The output buffer supplied was too small\n");
 			} else if (context->status == OUTPUT_BLOCKED_SUSPEND) {
@@ -720,6 +709,16 @@ static pthread_barrier_t barr;
 static void sync_all(void)
 {
 	pthread_barrier_wait(&barr);
+}
+
+static void *dma_allocator(void *opaque, size_t align, size_t size)
+{
+	return dma_mem_memalign(opaque, align, size);
+}
+
+static void dma_freer(void *opaque, void *addr)
+{
+	dma_mem_free(opaque, addr);
 }
 
 static const char STR_help[] = "--help";
@@ -777,6 +776,7 @@ int main(int argc, char *argv[])
 {
 	FILE *input_file = NULL;
 	const char *out_file_name = NULL;
+	unsigned int max_in_flight = 10000;
 	bool synchronous_mode = false; /* asynchronous by default */
 	enum suspend_policy suspend_policy = CONTINUE; /* Continue by default */
 	enum skip_policy skip_policy = RECYCLE; /* recycle by default */
@@ -791,16 +791,16 @@ int main(int argc, char *argv[])
 	struct work_context *contexts;
 	char *endptr;
 	struct dma_mem dce_mem;
-	enum dce_paradigm paradigm = DCE_STATEFUL_RECYCLE;
-	enum dce_compression_format format = DCE_CF_GZIP;
+	enum lane_paradigm paradigm = DCE_STATEFUL_RECYCLE;
+	enum lane_compression_format format = DCE_CF_GZIP;
 	unsigned int test_time = 2; /* 2 seconds by default */
 
 	struct fsl_mc_io *mc_io;
 	uint16_t dprc_token;
 	int dprc_id;
 	char dprc_id_str[50];
-	LIST_HEAD(dpio_list);
-	struct dpio_context *dpio_context;
+	LIST_HEAD(swp_list);
+	struct swp_context *swp_context;
 	int i, ret;
 
 	/* process command line args */
@@ -874,13 +874,13 @@ int main(int argc, char *argv[])
 							10 /* base 10 */);
 					while (NEXT_ARG()) {
 						if (!strncmp(*argv, "dpio.", strlen("dpio."))) {
-							dpio_context = malloc(sizeof(*dpio_context));
-							assert(dpio_context);
-							memset(dpio_context, 0, sizeof(*dpio_context));
-							dpio_context->id = strtoul(&(*argv)[strlen("dpio.")],
+							swp_context = malloc(sizeof(*swp_context));
+							assert(swp_context);
+							memset(swp_context, 0, sizeof(*swp_context));
+							swp_context->id = strtoul(&(*argv)[strlen("dpio.")],
 									&endptr,
 									10 /* base 10 */);
-							INIT_LIST_HEAD(&dpio_context->dpdcei_list);
+							INIT_LIST_HEAD(&swp_context->dpdcei_list);
 							while (NEXT_ARG()) {
 								if (!strncmp(*argv, "dpdcei.", strlen("dpdcei."))) {
 									struct dpdcei_context *dpdcei_context = malloc(sizeof(*dpdcei_context));
@@ -915,17 +915,17 @@ int main(int argc, char *argv[])
 										pr_err("Must specify threads\n");
 										exit(EXIT_FAILURE);
 									}
-									list_add_tail(&dpdcei_context->node, &dpio_context->dpdcei_list);
+									list_add_tail(&dpdcei_context->node, &swp_context->dpdcei_list);
 								} else {
 									argv--; argc++;
 									break;
 								}
 							}
-							if (list_empty(&dpio_context->dpdcei_list)) {
+							if (list_empty(&swp_context->dpdcei_list)) {
 								pr_err("Must specify dpdcei objects operating in this dpio\n");
 								exit(EXIT_FAILURE);
 							}
-							list_add_tail(&dpio_context->node, &dpio_list);
+							list_add_tail(&swp_context->node, &swp_list);
 							if (argc < 1) {
 								argv--; argc++;
 							}
@@ -934,7 +934,7 @@ int main(int argc, char *argv[])
 							break;
 						}
 					}
-					if (list_empty(&dpio_list)) {
+					if (list_empty(&swp_list)) {
 						pr_err("Must specify dpio objects to use\n");
 						exit(EXIT_FAILURE);
 					}
@@ -1011,7 +1011,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (list_empty(&dpio_list)) {
+	if (list_empty(&swp_list)) {
 		pr_err("Must provide dprc, dpio, and dpdcei resources for test\n");
 		exit(EXIT_FAILURE);
 	}
@@ -1076,7 +1076,7 @@ int main(int argc, char *argv[])
 		file_size = 0xFFF000;
 	}
 	/* vfio_setup_dma() must be called after vfio_setup() is called */
-	dce_mem.sz = (file_size + 0xFFF000) & 0xFFFFFFFFFFFF000;
+	dce_mem.sz = (file_size + 0xFFFF000) & 0xFFFFFFFFFFFF000;
 	dce_mem.addr = vfio_setup_dma(dce_mem.sz);
 	if (!dce_mem.addr) {
 		ret = -ENOMEM;
@@ -1166,45 +1166,67 @@ int main(int argc, char *argv[])
 
 	i = 0;
 	int cpu_count = 0;
-	list_for_each_entry(dpio_context, &dpio_list, node) {
+	list_for_each_entry(swp_context, &swp_list, node) {
 		struct dpdcei_context *dpdcei_context;
 
-		dpio_context->dpio = dpaa2_io_create(dpio_context->id, cpu_count);
-		if (!dpio_context->dpio) {
+		swp_context->swp = swp_create(swp_context->id);
+		if (!swp_context->swp) {
 			pr_err("dpio setup failed\n");
 			exit(EXIT_FAILURE);
 		}
 
-		list_for_each_entry(dpdcei_context, &dpio_context->dpdcei_list,
+		list_for_each_entry(dpdcei_context, &swp_context->dpdcei_list,
 					node) {
 			int j;
-			struct dce_session_params params;
+			struct dce_dpdcei_params dpdcei_params;
+			struct dpdcei_lane_params lane_params;
+
+			dpdcei_params = (struct dce_dpdcei_params) {
+					.dpdcei_id = dpdcei_context->id,
+					.mcp = mc_io,
+					.dma_alloc = dma_allocator,
+					.dma_free = dma_freer,
+					.dma_opaque = &dce_mem,
+					};
 
 			dpdcei_context->dpdcei =
-				dpdcei_setup(dpio_context->dpio,
-						dpdcei_context->id);
+				dce_dpdcei_activate(&dpdcei_params);
 			if (!dpdcei_context->dpdcei) {
 				pr_err("dpdcei setup failed\n");
 				exit(EXIT_FAILURE);
 			}
 
-			params = (struct dce_session_params){
-				.dpio = dpio_context->dpio,
+			lane_params = (struct dpdcei_lane_params){
+				.swp = swp_context->swp,
 				.dpdcei = dpdcei_context->dpdcei,
 				.paradigm = paradigm,
 				.compression_format = format,
 				.compression_effort =
 					DCE_CE_BEST_POSSIBLE,
+				.dma_alloc = dma_allocator,
+				.dma_free = dma_freer,
+				.dma_opaque = &dce_mem,
+				.max_in_flight = max_in_flight,
 				/* gz_header not used in ZLIB format mode */
 				/* buffer_pool_id not used */
 				/* buffer_pool_id2 not used */
 				/* release_buffers not used */
 				/* encode_base_64 not used */
-				.work_done_callback = wake_cb,
 			};
 
 			for (j = 0; j < dpdcei_context->num_workers; j++, i++) {
+				pthread_attr_t thread_attr;
+				cpu_set_t cpu;
 				struct work_context *context = &contexts[i];
+
+				CPU_ZERO(&cpu);
+				CPU_SET(0, &cpu);
+				ret = pthread_setaffinity_np(pthread_self(),
+					sizeof(cpu), &cpu);
+				if (ret) {
+					pr_err("Failed to affine main thread\n");
+					exit(EXIT_FAILURE);
+				}
 
 				context->chunk_list = &chunk_list;
 				context->out_file = out_file_name;
@@ -1213,19 +1235,17 @@ int main(int argc, char *argv[])
 				context->stream_suspend_policy = suspend_policy;
 				context->skipped_frames_policy = skip_policy;
 				context->recycle_interval = i ? 0 : recycle_interval;
-				context->session =
-					malloc(sizeof(*context->session));
-				ret = dce_session_create(context->session,
-						&params);
-				context->engine =
-					dpdcei_context->dpdcei->attr.engine;
-				if (ret) {
-					pr_err("dce_session_create() failed with %d\n",
+				context->lane =
+					dpdcei_lane_create(&lane_params);
+				context->dpdcei = dpdcei_context->dpdcei;
+				context->engine = !dpdcei_is_compression(
+					dpdcei_context->dpdcei);
+				context->swp = swp_context->swp;
+				if (!context->lane) {
+					pr_err("dpdcei_lane_create() failed with %d\n",
 							ret);
 					exit(EXIT_FAILURE);
 				}
-				pthread_attr_t thread_attr;
-				cpu_set_t cpu;
 				CPU_ZERO(&cpu);
 				CPU_SET(cpu_count, &cpu);
 				pthread_attr_init(&thread_attr);
@@ -1280,7 +1300,7 @@ int main(int argc, char *argv[])
 		if (context->ret)
 			pr_err("Worker %d finished with error %d\n",
 					context->idx, context->ret);
-		dce_session_destroy(context->session);
+		/*dpdcei_lane_destroy(context->lane);*/
 		total_total_in += context->total_in;
 		total_total_out += context->total_out;
 		if (context->engine == DPDCEI_ENGINE_COMPRESSION)
@@ -1307,13 +1327,13 @@ int main(int argc, char *argv[])
 			run_time,
 			cpufreq);
 
-	list_for_each_entry(dpio_context, &dpio_list, node) {
+	list_for_each_entry(swp_context, &swp_list, node) {
 		struct dpdcei_context *dpdcei_context;
 
-		list_for_each_entry(dpdcei_context, &dpio_context->dpdcei_list,
+		list_for_each_entry(dpdcei_context, &swp_context->dpdcei_list,
 					node)
-			dpdcei_cleanup(dpdcei_context->dpdcei);
-		/*dpaa2_io_destroy(dpio_context->dpio);*/
+			dce_dpdcei_deactivate(dpdcei_context->dpdcei);
+		/*dpaa2_io_destroy(swp_context->swp);*/
 	}
 
 	Mbps = Mbps * 8 /* bits per byte */ / test_time_us;

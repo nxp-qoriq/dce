@@ -152,6 +152,8 @@ static void local_free(struct dma_mem *map, void *ptr)
 			break;
 	}
 	fprintf(stderr, "DMA free, bad pointer!\n");
+	fprintf(stderr, "Stopping for debug\n");
+	getchar();
 }
 
 static inline int map_lock(struct dma_mem *map)

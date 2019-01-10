@@ -17,11 +17,6 @@ struct circ_fifo {
 };
 
 static void circ_fifo_setup(struct circ_fifo *fifo, void *mem,
-		unsigned int object_size, size_t number_objects);
-static void *circ_fifo_alloc(struct circ_fifo *fifo);
-static void circ_fifo_free(struct circ_fifo *fifo);
-
-static inline void circ_fifo_setup(struct circ_fifo *fifo, void *mem,
 		unsigned int object_size, size_t number_objects)
 {
 	fifo->allocer = 0;
@@ -98,6 +93,20 @@ static inline unsigned int circ_fifo_num_alloc(struct circ_fifo *fifo)
 {
 	return fifo->allocer >= fifo->freer ? fifo->allocer - fifo->freer :
 			fifo->allocer + (2 * fifo->num_bufs) - fifo->freer;
+}
+
+/**
+ * circ_fifo_addr_collision() - Detect if a given address falls within the fifo
+ * @fifo:	fifo object to check
+ * @addr:	Suspect address that should be outside the fifo mem
+ *
+ * Return:	True if a collision is found. False if the address is outside
+ */
+static inline bool circ_fifo_addr_collision(struct circ_fifo *fifo, void *addr)
+{
+	return (addr >= fifo->mem &&
+			(uint8_t *)addr < ((uint8_t *)fifo->mem +
+				(fifo->buf_size * fifo->num_bufs)));
 }
 
 #endif /* __CIRC_FIFO_H */

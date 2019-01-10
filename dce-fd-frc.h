@@ -23,9 +23,6 @@ enum dce_scus {
 	DCE_SCUS_UPDATE_DEBUG	= 2
 };
 
-
-#define CLEANUP_FRC 0x10000000
-
 void fd_frc_set_cmd(struct dpaa2_fd *d, enum dce_cmd cmd);
 enum dce_cmd fd_frc_get_cmd(const struct dpaa2_fd *d);
 

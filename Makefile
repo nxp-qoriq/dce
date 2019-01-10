@@ -9,6 +9,7 @@ OBJS = $(patsubst %.c, %.o, $(wildcard *.c lib/*.c))
 
 CFLAGS += -Iinclude
 CFLAGS += -Ilib/qbman_userspace/include
+CFLAGS += -Ilib/mc/include
 CFLAGS += -D_GNU_SOURCE
 CFLAGS += -O0 -g3
 CFLAGS += -pthread

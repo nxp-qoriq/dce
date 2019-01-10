@@ -65,7 +65,7 @@ enum mc_cmd_status {
 /**
  * High priority flag
  */
-#define MC_CMD_FLAG_PRI		0x00008000
+#define MC_CMD_PRIORITY_HIGH		0x80
 /**
  * Command completion flag
  */
