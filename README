@@ -1,19 +1,24 @@
-DCE API and Library Version 1808
+DCE API and Library Version 1903
 ----------------------------------
 
 This README describes how to build and run example applications of the dce.h
 library.
 
+Test program: dce-example
+-------------------------
+This is a highly modular example application that walks through many separate
+tests that build up in complexity.
+
 Test program: dce-api-perf-test
 -------------------------------
 
-This is a example application of the dce.h library. It can compress or
-decompress data with multiple formats and modes. e.g. zlib/raw
-stateful/stateless.  The number of threads and DPAA2 object resources
-(interfaces to the DCE hardware accelerator) is flexible. It can be
-configured to run multiple threads or a single thread. The number of
-threads can be specified per DCE interface (DPDCEI). Please use the
---help option to get a full list of parameters.
+This is a throughput measrement  application of the dce.h library. It can
+compress or decompress data with multiple formats and modes. e.g. zlib/raw
+stateful/stateless. The number of threads and DPAA2 object resources (interfaces
+to the DCE hardware accelerator) is flexible. It can be configured to run
+multiple threads or a single thread. The number of threads can be specified per
+DCE interface (DPDCEI). Please use the --help option to get a full list of
+parameters.
 
 Build instructions
 ------------------
@@ -118,12 +123,56 @@ redirection clearer.
 At this point, you can run the example applications as often as you
 like because its hardware resources have been allocated and assigned.
 
-Running stateless compression in asynchronous mode
----------------------------------------------------
+Running dce-example
+-------------------
+This application is easy to run. It contains input data required for the test,
+but the Data Path opbjects must be supplied
 
-This is a high-performance use case in which blocks of data are
-compressed independently.  In addition three threads are used to feed
-the DCE.
+```
+  sudo bin/dce-example dprc.2 dpio.10 dpdcei.0 dpdcei.5
+```
+
+The output is
+```
+  SETUP Data Path Objects ***************************************************************
+  Worker dce-example: Setup MC resources
+  Worker dce-example: Open root dprc
+  Worker dce-example: Open test dprc
+  Worker dce-example: Setup vfio to allow HW devices to access virtual addresses
+  Worker dce-example: Allocate virtual memory and map it to test dprc using vfio
+  Worker dce-example: Setup QBman Software Portal
+  Worker dce-example: Setup Decompression Compression Engine devices
+
+  TESTS *********************************************************************************
+  _________________________________________________________________________
+  Test # 0: single_chunk_compress
+  Worker dce-example: Setting up dpdcei_lane
+  Worker dce-example: Setting up input data
+  Worker dce-example: Setting up output buffer
+  Worker dce-example: Sending operation on compression dpdcei
+  Worker dce-example: Polling for result
+  Worker dce-example: Received response with status STREAM_END
+  Worker dce-example: Success
+  _________________________________________________________________________
+  _________________________________________________________________________
+  Test # 1: single_chunk_decompress
+  Worker dce-example: Setting up dpdcei_lane
+  Worker dce-example: Compress data for decompression testing
+  Worker dce-example: Setting up input data
+  Worker dce-example: Setting up output buffer
+  Worker dce-example: Sending operation on decompression dpdcei
+  Worker dce-example: Polling for result
+  Worker dce-example: Received response with status STREAM_END
+  Worker dce-example: Checking if the decompressed data matches the original data
+  Worker dce-example: Success
+  _________________________________________________________________________
+```
+
+Running dce-api-perf-test stateless compression in asynchronous mode
+--------------------------------------------------------------------
+
+This is a high-performance use case in which blocks of data are compressed
+independently.  In addition three threads are used to feed the DCE.
 
 ```
   # Put some data into input-file
