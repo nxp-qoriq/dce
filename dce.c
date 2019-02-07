@@ -304,7 +304,7 @@ struct dpdcei_lane *dpdcei_lane_create(struct dpdcei_lane_params *params)
 
 	atomic_set(&lane->frames_in_flight, 0);
 
-	assert(params->max_in_flight > 10);
+	assert(params->max_in_flight > 0);
 
 	/* Setup lane circular fifo */
 	fifo_mem = lane->dma_alloc(lane->dma_opaque, 64,
@@ -322,6 +322,8 @@ struct dpdcei_lane *dpdcei_lane_create(struct dpdcei_lane_params *params)
 	err = send_init_frame(params->swp, lane, setup_work_unit);
 	if (err)
 		goto err_enqueue_init_frame;
+
+	atomic_inc(&lane->frames_in_flight);
 
 	while (!lane_dequeue_fd_pair(params->swp, lane, ops,
 				num_setup_frames /* 1 */) && timeout--)
@@ -359,6 +361,19 @@ err_mutex_setup:
 err_alloc_lane_hw_mem:
 	free(lane);
 	return NULL;
+}
+
+int dpdcei_lane_destroy(struct dpdcei_lane *lane)
+{
+	if (atomic_read(&lane->frames_in_flight)) {
+		pr_err("Attempt to destroy lane that still has work in flight. call *_dequeue() to clear lane\n");
+		return -EBUSY;
+	}
+
+	lane->dma_free(lane->dma_opaque, lane->fifo.mem);
+	free(lane);
+
+	return 0;
 }
 
 /**
@@ -598,6 +613,8 @@ int lane_enqueue_fd_pair(struct qbman_swp *swp,
 		sem_post(&lane->enqueue_sem);
 	if (ret)
 		goto err_enqueue_fail;
+
+	atomic_inc(&lane->frames_in_flight);
 
 	assert(work_unit->finish_cb == finish_user_fd);
 
@@ -1098,6 +1115,8 @@ int lane_recycle_fd_pair(struct qbman_swp *swp,
 	ret = enqueue_dpdcei(swp, lane->dpdcei, head_fd);
 	if (ret)
 		goto fail_enqueue;
+
+	atomic_inc(&lane->frames_in_flight);
 
 	assert(lane->recycle_todo > 0);
 	/* recycle is allowed so long as recycle_todo is above 0, but not

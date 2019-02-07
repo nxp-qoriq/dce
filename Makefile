@@ -11,7 +11,7 @@ CFLAGS += -Iinclude
 CFLAGS += -Ilib/qbman_userspace/include
 CFLAGS += -Ilib/mc/include
 CFLAGS += -D_GNU_SOURCE
-CFLAGS += -O0 -g3
+CFLAGS += -O2
 CFLAGS += -pthread
 CFLAGS += ${EXTRA_CFLAGS}
 CFLAGS += -Wall
@@ -33,7 +33,7 @@ BIN =./bin
 
 MKDIR = mkdir -p
 
-EXECS = $(BIN)/dce-api-perf-test
+EXECS = $(BIN)/dce-api-perf-test $(BIN)/dce-example
 
 all: $(EXECS)
 

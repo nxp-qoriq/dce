@@ -12,7 +12,7 @@
 #include "dce-test-data.h"
 #include <fsl_dpdcei.h>
 #include <allocator.h>
-#include "qbman_helper.h"
+#include "helper_swp.h"
 #include "private.h"
 
 struct chunk {
@@ -404,14 +404,6 @@ static void *worker_dq(void *__context)
 						break;
 				}
 				atomic_inc(&context->eq);
-				/* FIXME: This assert can legally trigger if a
-				 * call to dequeue_fd() returns the last skipped
-				 * frames in addition to another
-				 * OTUPUT_BLOCKED_SUSPEND. to resolve this we
-				 * can either call dequeue_fd() with only space
-				 * for one op or we can try to make sure we do
-				 * not trigger a double within the pull window
-				 * of 16 fds */
 				assert(ret >= 0);
 				debug(5, "frame %u flush %s, input %u bytes, output buffer %u bytes\n",
 					atomic_read(&context->eq),
@@ -632,7 +624,7 @@ static void *worker_func(void *__context)
 			dpaa2_fd_get_len(&input_fd),
 			dpaa2_fd_get_len(&output_fd));
 
-		unsigned int flow_max = 1000;
+		int flow_max = 1000;
 
 		if (atomic_read(&context->eq) > atomic_read(&context->dq) + flow_max) {
 			bool sampled = false;
@@ -1169,7 +1161,7 @@ int main(int argc, char *argv[])
 	list_for_each_entry(swp_context, &swp_list, node) {
 		struct dpdcei_context *dpdcei_context;
 
-		swp_context->swp = swp_create(swp_context->id);
+		swp_context->swp = dce_helper_swp_init(swp_context->id);
 		if (!swp_context->swp) {
 			pr_err("dpio setup failed\n");
 			exit(EXIT_FAILURE);
@@ -1333,7 +1325,7 @@ int main(int argc, char *argv[])
 		list_for_each_entry(dpdcei_context, &swp_context->dpdcei_list,
 					node)
 			dce_dpdcei_deactivate(dpdcei_context->dpdcei);
-		/*dpaa2_io_destroy(swp_context->swp);*/
+		dce_helper_swp_finish(swp_context->swp);
 	}
 
 	Mbps = Mbps * 8 /* bits per byte */ / test_time_us;

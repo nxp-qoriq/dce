@@ -6,15 +6,21 @@
 
 /* QBMan helper functions for applications of dce.h */
 
+#ifndef __QMAN_HELPER_H
+#define __QMAN_HELPER_H
+
+#include <fsl_dpio.h>
+#include <fsl_mc_sys.h>
 
 /**
- * swp_create() - create a swp object.
+ * dce_helper_swp_init() - create a swp object.
+ * @dpio_id:	Identifier of the dpio object to map as a Software Portal
  *
  * Activates a "struct qbman_swp" corresponding to the given dpio_id
  *
  * Return a valid swp object for success, or NULL for failure.
  */
-static struct qbman_swp *swp_create(int dpio_id)
+static struct qbman_swp *dce_helper_swp_init(int dpio_id)
 {
 	char dpio_id_str[20];
 	struct fsl_mc_io *mc_io;
@@ -72,7 +78,7 @@ static struct qbman_swp *swp_create(int dpio_id)
 	 * qbman_userspace library moves this define to fsl_qbman_portal.h */
 #define QMAN_REV_5000   0x05000000
 	sprintf(dpio_id_str, "dpio.%i", dpio_id);
-	swp_desc.cena_bar = vfio_map_portal_mem(dpio_id_str,
+	swp_desc.cena_bar = vfio_map_portal(dpio_id_str,
 				    dpio_attr.qbman_version < QMAN_REV_5000 ?
 				    PORTAL_MEM_CENA : PORTAL_MEM_MB_CENA);
 	if (!swp_desc.cena_bar) {
@@ -81,7 +87,7 @@ static struct qbman_swp *swp_create(int dpio_id)
 		goto err_portal_cache_enabled_mem_setup;
 	}
 
-	swp_desc.cinh_bar = vfio_map_portal_mem(dpio_id_str,
+	swp_desc.cinh_bar = vfio_map_portal(dpio_id_str,
 							PORTAL_MEM_CINH);
 	if (!swp_desc.cinh_bar) {
 		pr_err("error %d in %s in attempt to vfio_map_portal_mem() cache inhibited area\n",
@@ -121,8 +127,98 @@ err_mc_io_alloc:
 	return NULL;
 }
 
-static void swp_finish(struct qbman_swp *swp)
+/**
+ * dce_helper_swp_finish() - Finish and free memroy associated a a particular swp
+ * @swp:	Software portal to use for cleanup
+ *
+ * Return:	0 on success error code otherwise
+ */
+static int dce_helper_swp_finish(struct qbman_swp *swp)
 {
+	int dpio_id;
+	char dpio_id_str[20];
+	struct fsl_mc_io *mc_io;
+	struct dpio_attr dpio_attr;
+	uint16_t dpio_token;
+	const struct qbman_swp_desc *swp_desc;
+	int err;
+
+	swp_desc = qbman_swp_get_desc(swp);
+	if (!swp_desc)
+		return -EINVAL;
+
+	dpio_id = swp_desc->idx;
+
+	mc_io = malloc(sizeof(struct fsl_mc_io));
+	if (!mc_io)
+		return -ENOMEM;
+
+	err = mc_io_init(mc_io);
+	if (err)
+		goto err_mc_io_init;
+
+	/* DPIO configuration */
+	err = dpio_open(mc_io, 0, dpio_id, &dpio_token);
+	if (err) {
+		pr_err("error %d in %s in attempt to dpio_open()\n",
+				err, __func__);
+		goto err_dpio_open;
+	}
+
+	err = dpio_get_attributes(mc_io, 0, dpio_token, &dpio_attr);
+	if (err) {
+		pr_err("error %d in %s in attempt to dpio_get_attributes()\n",
+				err, __func__);
+		goto err_dpio_open;
+	}
+
+	sprintf(dpio_id_str, "dpio.%i", dpio_id);
+	err = vfio_unmap_portal(swp_desc->cena_bar, dpio_id_str,
+			dpio_attr.qbman_version < QMAN_REV_5000 ?
+			PORTAL_MEM_CENA : PORTAL_MEM_MB_CENA);
+	if (err) {
+		pr_err("error %d in %s in attempt to vfio_unmap_portal() cena\n",
+				err, __func__);
+		goto err_dpio_open;
+	}
+
+	err = vfio_unmap_portal(swp_desc->cinh_bar, dpio_id_str,
+							PORTAL_MEM_CINH);
+	if (err) {
+		pr_err("error %d in %s in attempt to vfio_unmap_portal() cinh\n",
+				err, __func__);
+		goto err_dpio_open;
+	}
+
+	err = dpio_disable(mc_io, 0, dpio_token);
+	if (err) {
+		pr_err("error %d in %s in attempt to dpio_enable()\n",
+				err, __func__);
+		goto err_dpio_open;
+	}
+
+	err = dpio_reset(mc_io, 0, dpio_token);
+	if (err) {
+		pr_err("error %d in %s in attempt to dpio_reset()\n",
+				err, __func__);
+		goto err_dpio_open;
+	}
+	err = dpio_close(mc_io, 0, dpio_token);
+	if (err) {
+		pr_err("error %d in %s in attempt to dpio_close()\n",
+				err, __func__);
+		goto err_dpio_open;
+	}
+
 	qbman_swp_finish(swp);
+
+	return err;
+
+err_dpio_open:
+	mc_io_cleanup(mc_io);
+err_mc_io_init:
+	free(mc_io);
+	return err;
 }
 
+#endif /* __QMAN_HELPER_H */

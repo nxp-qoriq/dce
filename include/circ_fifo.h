@@ -16,7 +16,7 @@ struct circ_fifo {
 	pthread_mutex_t free_lock;
 };
 
-static void circ_fifo_setup(struct circ_fifo *fifo, void *mem,
+static inline void circ_fifo_setup(struct circ_fifo *fifo, void *mem,
 		unsigned int object_size, size_t number_objects)
 {
 	fifo->allocer = 0;

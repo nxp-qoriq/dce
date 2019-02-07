@@ -5,6 +5,7 @@
  */
 #include "dce-scf-decompression.h"
 #include "dce-attr-encoder-decoder.h"
+#include <std_types.h>
 
 /* DCE_CODE (word_offset, lsb_offset, bit_width) */
 static struct dce_attr_code code_ffdpc_lo = DCE_CODE(0, 0, 32);

@@ -99,9 +99,9 @@ static inline void out_be32(volatile void *__p, u32 val)
 		printf(fmt, ##args); \
 		fflush(stdout); \
 	} while (0)
-#define pr_crit(fmt, args...)	 prflush("CRIT:" fmt, ##args)
-#define pr_err(fmt, args...)	 prflush("ERR:" fmt, ##args)
-#define pr_warning(fmt, args...) prflush("WARN:" fmt, ##args)
+#define pr_crit(fmt, args...)	 prflush("CRIT: " fmt, ##args)
+#define pr_err(fmt, args...)	 prflush("ERR: %s: " fmt, __func__, ##args)
+#define pr_warning(fmt, args...) prflush("WARN: %s: " fmt, __func__, ##args)
 #define pr_info(fmt, args...)	 prflush(fmt, ##args)
 
 #define BUG()	abort()
@@ -217,9 +217,6 @@ do { \
 	uint32_t *__p = p; \
 	*__p = be32toh(*__p); \
 })
-
-#define lower_32_bits(x) ((u32)(x))
-#define upper_32_bits(x) ((u32)(((x) >> 16) >> 16))
 
 /* Compiler/type stuff */
 typedef unsigned int	gfp_t;

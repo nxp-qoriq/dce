@@ -8,6 +8,7 @@
 
 #include <linux/kernel.h>
 #include <compat.h>
+#include <std_types.h>
 
 /**
  * DOC: DPAA2 FD - Frame Descriptor APIs for DPAA2
