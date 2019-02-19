@@ -529,8 +529,8 @@ static void *worker_func(void *__context)
 				CPU_SET(i + 1, &cpu);
 			break;
 		}
-		assert(false); /* Should not reach here */
 	}
+	assert(CPU_COUNT(&cpu) == 1); /* Should be affine to a single cpu */
 
 	pthread_attr_init(&thread_attr);
 	/* We inherit the enqueuer affinity by default in phtread_create() the
