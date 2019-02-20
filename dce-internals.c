@@ -439,7 +439,7 @@ static inline int process_pull_response(struct dq_store *store)
 	unsigned int count = 0;
 
 	do {
-		unsigned int timeout = 10000;
+		unsigned int timeout = 1000000;
 #ifdef DEBUG
 		static struct dpaa2_dq prev_dq;
 #endif
@@ -447,7 +447,7 @@ static inline int process_pull_response(struct dq_store *store)
 		/* Grab frame by frame from store */
 		do {
 			dq = dq_store_next(store, &is_last);
-		} while (!is_last && !dq && --timeout);
+		} while (!is_last && !dq); /* && --timeout);*/
 		/* is_last or dq is true */
 
 		assert(timeout > 0);

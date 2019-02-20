@@ -26,7 +26,7 @@ static struct qbman_swp *dce_helper_swp_init(int dpio_id)
 	struct fsl_mc_io *mc_io;
 	struct dpio_attr dpio_attr;
 	uint16_t dpio_token;
-	struct qbman_swp_desc swp_desc;
+	struct qbman_swp_desc swp_desc = {0};
 	struct qbman_swp *swp = NULL;
 	int err;
 
@@ -99,6 +99,7 @@ static struct qbman_swp *dce_helper_swp_init(int dpio_id)
 	swp_desc.eqcr_mode = qman_eqcr_vb_array;
 	swp_desc.irq = 0;
 	swp_desc.qman_version = dpio_attr.qbman_version;
+	swp_desc.cena_access_mode = qman_cena_fastest_access;
 	swp = qbman_swp_init(&swp_desc);
 	if (!swp) {
 		pr_err("qbman_swp_init() failed in %s\n", __func__);

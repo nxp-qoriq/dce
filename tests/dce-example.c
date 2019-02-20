@@ -266,7 +266,9 @@ int main(int argc, char *argv[])
 	dce_dpdcei_deactivate(comp_dpdcei);
 	dce_dpdcei_deactivate(decomp_dpdcei);
 	dce_helper_swp_finish(swp);
-	vfio_cleanup_dma(dce_mem.addr, dce_mem.sz);
+	/* TODO: vfio_cleanup should be done after lane_destroy() is updated to
+	 * send context invalidate frame */
+	/*vfio_cleanup_dma(dce_mem.addr, dce_mem.sz);*/
 	free(mc_io);
 
 	return 0;

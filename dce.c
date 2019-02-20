@@ -370,6 +370,9 @@ int dpdcei_lane_destroy(struct dpdcei_lane *lane)
 		return -EBUSY;
 	}
 
+	/* TODO: Should send a context invalidate frame here to invalidate the
+	 * data cached in DCE */
+
 	lane->dma_free(lane->dma_opaque, lane->fifo.mem);
 	free(lane);
 
