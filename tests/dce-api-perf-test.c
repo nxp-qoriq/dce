@@ -213,7 +213,8 @@ static void *worker_dq(void *__context)
 						out_stream);
 					if (ret != (int)dpaa2_fd_get_len(&op->output_fd)
 						|| ferror(out_stream)) {
-						debug(0, "ERROR: failed to write output to file\n");
+						debug(0, "ERROR: failed to write output to file because %s\n",
+							strerror(errno));
 						fclose(out_stream);
 					}
 					if (fclose(out_stream))
@@ -238,7 +239,8 @@ static void *worker_dq(void *__context)
 					if (ret != (int)dpaa2_fd_get_len(
 						&op->output_fd)
 						|| ferror(out_stream)) {
-						debug(0, "ERROR: failed to write output to file\n");
+						debug(0, "ERROR: failed to write output to file because %s\n",
+							strerror(errno));
 						fclose(out_stream);
 						out_stream = NULL;
 					}
@@ -1076,62 +1078,6 @@ int main(int argc, char *argv[])
 	}
 	dma_mem_allocator_init(&dce_mem);
 
-	/* Prepare input data list */
-	if (input_file) {
-		/* Get input data from sample data file */
-		uint8_t buf[chunk_size];
-		size_t bytes_in;
-
-		while ((bytes_in = fread(buf, 1, chunk_size, input_file)) > 0) {
-			struct chunk *new_chunk = malloc(sizeof(struct chunk));
-			const size_t out_size = 15 + chunk_size;
-
-			new_chunk->addr =
-			   (dma_addr_t) dma_mem_memalign(&dce_mem, 0, bytes_in);
-			if (!new_chunk->addr) {
-				pr_err("Unable to allocate dma memory for DCE\n");
-				exit(EXIT_FAILURE);
-			}
-			new_chunk->out_addr =
-				(dma_addr_t) dma_mem_memalign(&dce_mem, 0, out_size);
-			if (!new_chunk->out_addr) {
-				pr_err("Unable to allocate dma memory for DCE\n");
-				exit(EXIT_FAILURE);
-			}
-			new_chunk->out_size = out_size;
-			memcpy((void *)new_chunk->addr, buf, bytes_in);
-			new_chunk->size = bytes_in;
-			list_add_tail(&new_chunk->node, &chunk_list);
-			num_chunks++;
-		}
-		fclose(input_file);
-	} else { /* No input file provided, use stock data */
-		if (dce_test_data_size < chunk_size) {
-			pr_err("Chunk size passed is not supported with default data file. Please add an input file parameter large enough for the chunk size\n");
-			exit(EXIT_FAILURE);
-		}
-		/* Add chunk if data_len does not divide evenly into chunks */
-		num_chunks = (dce_test_data_size / chunk_size) +
-			!!(dce_test_data_size % chunk_size);
-		for (i = 0; i < (signed)num_chunks; i++) {
-			struct chunk *new_chunk = malloc(sizeof(struct chunk));
-			/* Make sure to allocate only needed for last chunk */
-			new_chunk->size = (i + 1 == (signed)num_chunks) ?
-				dce_test_data_size - (i * chunk_size) :
-				chunk_size;
-			new_chunk->addr = (dma_addr_t)
-				dma_mem_memalign(&dce_mem, 0, new_chunk->size);
-			if (!new_chunk->addr) {
-				pr_err("Unable to allocate dma memory for DCE\n");
-				exit(EXIT_FAILURE);
-			}
-			memcpy((void *)new_chunk->addr,
-				&dce_test_data[i * chunk_size],
-				new_chunk->size);
-			list_add_tail(&new_chunk->node, &chunk_list);
-		}
-	}
-
 	/* Check cycle counter sanity */
 	start = read_cntvct();
 	usleep(50000);
@@ -1258,6 +1204,82 @@ int main(int argc, char *argv[])
 		 * time to lower cache contention */
 		cpu_count += 2 % get_nprocs();
 	}
+
+	/* Prepare input data list */
+	if (input_file) {
+		/* Get input data from sample data file */
+		uint8_t buf[chunk_size];
+		size_t bytes_in;
+		bool alloc_for_decomp = false;
+
+		for (i = 0; i < (signed)num_threads; i++) {
+			if (contexts[i].engine != DPDCEI_ENGINE_COMPRESSION) {
+				alloc_for_decomp = true;
+				break;
+			}
+		}
+
+		while ((bytes_in = fread(buf, 1, chunk_size, input_file)) > 0) {
+			struct chunk *new_chunk = malloc(sizeof(struct chunk));
+			const size_t out_size = alloc_for_decomp ?
+				15 + max_decomp_ratio * chunk_size :
+				15 + chunk_size;
+
+			new_chunk->addr =
+			   (dma_addr_t) dma_mem_memalign(&dce_mem, 0, bytes_in);
+			if (!new_chunk->addr) {
+				pr_err("Unable to allocate dma memory for DCE\n");
+				exit(EXIT_FAILURE);
+			}
+			new_chunk->out_addr =
+				(dma_addr_t) dma_mem_memalign(&dce_mem, 0, out_size);
+			if (!new_chunk->out_addr) {
+				pr_err("Unable to allocate dma memory for DCE\n");
+				exit(EXIT_FAILURE);
+			}
+			new_chunk->out_size = out_size;
+			memcpy((void *)new_chunk->addr, buf, bytes_in);
+			new_chunk->size = bytes_in;
+			list_add_tail(&new_chunk->node, &chunk_list);
+			num_chunks++;
+		}
+		fclose(input_file);
+	} else { /* No input file provided, use stock data */
+		for (i = 0; i < (signed)num_threads; i++) {
+			if (contexts[i].engine != DPDCEI_ENGINE_COMPRESSION) {
+				pr_err("Please provide compressed input file to run decompression test\n");
+				exit(EXIT_FAILURE);
+			}
+		}
+
+		if (dce_test_data_size < chunk_size) {
+			pr_err("Chunk size passed is not supported with default data file. Please add an input file parameter large enough for the chunk size\n");
+			exit(EXIT_FAILURE);
+		}
+
+		/* Add chunk if data_len does not divide evenly into chunks */
+		num_chunks = (dce_test_data_size / chunk_size) +
+			!!(dce_test_data_size % chunk_size);
+		for (i = 0; i < (signed)num_chunks; i++) {
+			struct chunk *new_chunk = malloc(sizeof(struct chunk));
+			/* Make sure to allocate only needed for last chunk */
+			new_chunk->size = (i + 1 == (signed)num_chunks) ?
+				dce_test_data_size - (i * chunk_size) :
+				chunk_size;
+			new_chunk->addr = (dma_addr_t)
+				dma_mem_memalign(&dce_mem, 0, new_chunk->size);
+			if (!new_chunk->addr) {
+				pr_err("Unable to allocate dma memory for DCE\n");
+				exit(EXIT_FAILURE);
+			}
+			memcpy((void *)new_chunk->addr,
+				&dce_test_data[i * chunk_size],
+				new_chunk->size);
+			list_add_tail(&new_chunk->node, &chunk_list);
+		}
+	}
+
+
 	/* Wait for all threads to sleep on starting line */
 	usleep(100000);
 	/**********************************************************************/
