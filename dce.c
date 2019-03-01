@@ -255,6 +255,9 @@ struct dpdcei_lane *dpdcei_lane_create(struct dpdcei_lane_params *params)
 	lane->dma_opaque = params->dma_opaque;
 
 	if (lane->paradigm == DCE_STATEFUL_RECYCLE) {
+		if (lane->dpdcei->attr.dce_version == ERR011568_DCE_REV)
+			pr_err("Stateful-recycle mode may trigger ERR011568 on this SoC if recycle mode is triggered\n");
+
 		err = pthread_mutex_init(&lane->lock,
 				NULL /* DEFAULT MUTEX */);
 		if (err) {

@@ -20,6 +20,9 @@
 /* ls2085 DCE */
 #define ERR008704_DCE_REV 0x0AF0020000000000LLU
 
+/* lx2160 rev 1 */
+#define ERR011568_DCE_REV 0x0AF002010000009BLLU
+
 struct dq_store {
 	struct qbman_result *addr;
 	unsigned int max_dq;
