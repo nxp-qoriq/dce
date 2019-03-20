@@ -39,6 +39,7 @@ struct dma_hw_mem {
 struct dpdcei {
 	uint16_t token;
 	struct dpdcei_attr attr;
+	struct fsl_mc_io *mcp;
 	u32 done_queue_fqid;
 	u32 todo_queue_fqid;
 	atomic_t frames_in_flight;
