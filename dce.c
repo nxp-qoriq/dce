@@ -36,6 +36,9 @@ struct dpdcei *dce_dpdcei_activate(struct dce_dpdcei_params *params)
 	}
 	memset(dpdcei, 0, sizeof(*dpdcei));
 
+	/* MC portal needed to cleanup dpdcei resources on deactivate */
+	dpdcei->mcp = params->mcp;
+
 	/* in flight counter initialization */
 	atomic_set(&dpdcei->frames_in_flight, 0);
 
@@ -202,6 +205,8 @@ void dce_dpdcei_deactivate(struct dpdcei *dpdcei)
 {
 	dpdcei->dma_free(dpdcei->dma_opaque, dpdcei->store_1.addr);
 	dpdcei->dma_free(dpdcei->dma_opaque, dpdcei->store_2.addr);
+	dpdcei_disable(dpdcei->mcp, MC_CMD_PRIORITY_HIGH, dpdcei->token);
+	dpdcei_close(dpdcei->mcp, MC_CMD_PRIORITY_HIGH, dpdcei->token);
 	free(dpdcei);
 }
 
