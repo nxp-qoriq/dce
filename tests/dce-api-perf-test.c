@@ -107,7 +107,7 @@ static unsigned long get_ularg(const char *s, const char *pref)
 }
 
 static size_t chunk_size = 16 * 1024;
-size_t max_decomp_ratio = 30; /* default maximum decompression ratio is 30, It
+size_t max_decomp_ratio = 40; /* default maximum decompression ratio is 30, It
 			       * can be changed using a parameter if the input
 			       * data expands to more than 30 times the input
 			       * size
@@ -146,7 +146,7 @@ static void *worker_dq(void *__context)
 	debug(1, "Running on core %d\n", sched_getcpu());
 
 	while (!context->dequeue_stop || (atomic_read(&context->eq) > atomic_read(&context->dq))) {
-		const unsigned int max_num_fds = 16;
+		const unsigned int max_num_fds = 32;
 		struct dce_op_fd_pair_rx ops[max_num_fds];
 
 		num_ops = lane_dequeue_fd_pair(context->swp, context->lane, ops,
@@ -1222,8 +1222,8 @@ int main(int argc, char *argv[])
 		while ((bytes_in = fread(buf, 1, chunk_size, input_file)) > 0) {
 			struct chunk *new_chunk = malloc(sizeof(struct chunk));
 			const size_t out_size = alloc_for_decomp ?
-				15 + max_decomp_ratio * chunk_size :
-				15 + chunk_size;
+				50 + max_decomp_ratio * chunk_size :
+				1000 + chunk_size;
 
 			new_chunk->addr =
 			   (dma_addr_t) dma_mem_memalign(&dce_mem, 0, bytes_in);

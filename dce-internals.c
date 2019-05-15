@@ -485,7 +485,7 @@ int pull_done_queue(struct qbman_swp *swp, struct dpdcei *dpdcei)
 {
 	int pull_count = 0;
 	/* Empirically found limits that balance throughput with CPU overhead */
-	int max_pulls = 1;
+	int max_pulls = 3;
 	int err;
 
 	err = pthread_mutex_trylock(&dpdcei->pull_lock);
