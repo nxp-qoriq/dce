@@ -1240,13 +1240,13 @@ int main(int argc, char *argv[])
 			new_chunk->addr =
 			   (dma_addr_t) dma_mem_memalign(&dce_mem, 0, bytes_in);
 			if (!new_chunk->addr) {
-				pr_err("Unable to allocate dma memory for DCE\n");
+				pr_err("Input file size is too large. Please used a smaller input file\n");
 				exit(EXIT_FAILURE);
 			}
 			new_chunk->out_addr =
 				(dma_addr_t) dma_mem_memalign(&dce_mem, 0, out_size);
 			if (!new_chunk->out_addr) {
-				pr_err("Unable to allocate dma memory for DCE\n");
+				pr_err("Input file size is too large. Please used a smaller input file\n");
 				exit(EXIT_FAILURE);
 			}
 			new_chunk->out_size = out_size;
