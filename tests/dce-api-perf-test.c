@@ -1134,6 +1134,18 @@ int main(int argc, char *argv[])
 				exit(EXIT_FAILURE);
 			}
 
+			if (!dpdcei_is_compression(dpdcei_context->dpdcei) &&
+					paradigm == DCE_STATELESS) {
+				/* In stateless decompression the input file
+				 * size must match the chunk size. i.e. A
+				 * complete DEFLATE stream must be passed to DCE
+				 * per operation */
+				if (file_size != chunk_size) {
+					pr_err("File size must match chunk size in stateless decompression tests because DEFLATE stream end must match chunk end\n");
+					exit(EXIT_FAILURE);
+				}
+			}
+
 			lane_params = (struct dpdcei_lane_params){
 				.swp = swp_context->swp,
 				.dpdcei = dpdcei_context->dpdcei,
