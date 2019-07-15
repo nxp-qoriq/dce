@@ -12,7 +12,7 @@ tests that build up in complexity.
 Test program: dce-api-perf-test
 -------------------------------
 
-This is a throughput measrement  application of the dce.h library. It can
+This is a throughput measurement application of the dce.h library. It can
 compress or decompress data with multiple formats and modes. e.g. zlib/raw
 stateful/stateless. The number of threads and DPAA2 object resources (interfaces
 to the DCE hardware accelerator) is flexible. It can be configured to run
@@ -29,7 +29,7 @@ You can cross compile or build natively.  For example,
   make CROSS_COMPILE=aarch64-linux-gnu-
 ```
 
-assuming cross compiler aarch64-linux-gnu-gcc is on your path.  Or
+Assuming cross compiler aarch64-linux-gnu-gcc is on your path.  Or
 
 ```
   make CROSS_COMPILE=' '
@@ -126,7 +126,7 @@ like because its hardware resources have been allocated and assigned.
 Running dce-example
 -------------------
 This application is easy to run. It contains input data required for the test,
-but the Data Path opbjects must be supplied
+but the Data Path objects must be supplied
 
 ```
   sudo bin/dce-example dprc.2 dpio.10 dpdcei.0 dpdcei.5
